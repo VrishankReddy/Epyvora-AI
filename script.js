@@ -239,7 +239,7 @@ function buildHistory() {
     .map(m => ({ role: m.role, content: m.content }));
 }
 
-/* ── Main send function — proxies through /api/chat ── */
+/* ── Main send function — streams progress from /api/chat ── */
 async function send(value) {
   const question = value.trim();
   if (busy) return;
@@ -259,6 +259,7 @@ async function send(value) {
   $('prompt').disabled     = true;
   renderAll();
 
+  // Insert the typing bubble immediately so the user sees activity
   $('feed').insertAdjacentHTML('beforeend', messageHtml({ role: 'typing' }));
 
   try {
@@ -269,34 +270,75 @@ async function send(value) {
     });
 
     if (!res.ok) {
+      // Non-2xx before streaming started (e.g. 400, 500)
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Server returned HTTP ${res.status}.`);
     }
 
-    const data = await res.json();
+    // Read the NDJSON stream line-by-line
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
 
-    // Update typing indicator with live search focus if server provided it
-    const stage = $('researchStage');
-    if (stage && data.searchQuery) {
-      stage.innerHTML =
-        `<span class="interpretation">Focus: ${esc(data.searchQuery)}</span> · ` +
-        (data.specificity === 'specific'
-          ? 'narrowing to the strongest matching papers'
-          : 'searching broadly across related papers') + '.';
+    while (true) {
+      const { done, value: chunk } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep any incomplete trailing line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let evt;
+        try { evt = JSON.parse(trimmed); } catch { continue; }
+
+        /* ── Stage 1: interpretation complete → update typing bubble text ── */
+        if (evt.event === 'interpreted') {
+          const stage = $('researchStage');
+          if (stage) {
+            stage.innerHTML =
+              `<span class="interpretation">Focus: ${esc(evt.searchQuery)}</span> · ` +
+              (evt.specificity === 'specific'
+                ? 'narrowing to the strongest matching papers'
+                : 'searching broadly across related papers') + '.';
+          }
+        }
+
+        /* ── Stage 2: papers retrieved → update typing bubble with count ── */
+        if (evt.event === 'searching') {
+          const stage = $('researchStage');
+          if (stage) {
+            stage.textContent =
+              `Searched the full scholarly index and selected ${evt.count} ` +
+              `${evt.count === 1 ? 'paper' : 'papers'}. Synthesising the retrieved evidence.`;
+          }
+        }
+
+        /* ── Stage 3: final answer ── */
+        if (evt.event === 'result') {
+          chat.messages.push({
+            role:        'assistant',
+            content:     evt.answer,
+            status:      evt.status,
+            agreement:   evt.agreement,
+            limitations: evt.limitations,
+            sources:     evt.sources     || [],
+            searchQuery: evt.searchQuery || '',
+          });
+          save();
+          renderAll();
+        }
+
+        /* ── Server-side error event ── */
+        if (evt.event === 'error') {
+          throw new Error(evt.error || 'An unexpected server error occurred.');
+        }
+      }
     }
 
-    chat.messages.push({
-      role:        'assistant',
-      content:     data.answer,
-      status:      data.status,
-      agreement:   data.agreement,
-      limitations: data.limitations,
-      sources:     data.sources     || [],
-      searchQuery: data.searchQuery || '',
-    });
-
-    save();
-    renderAll();
   } catch (error) {
     $('typing')?.remove();
     addError(error.message);

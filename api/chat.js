@@ -1,20 +1,22 @@
 /* =============================================================
-   api/chat.js — Vercel Serverless Function
-   Secure proxy: keeps SCHOLAR_API_KEY and LLM_API_KEY server-side.
+   api/chat.js — Vercel Serverless Function (streaming)
+   Secure proxy: SCHOLAR_API_KEY and LLM_API_KEY stay server-side.
 
-   Flow:
-     1. Receive { question, history } from client (POST only).
-     2. Call Gemini to interpret the question → search plan.
-     3. Query OpenAlex with the search plan variants.
-     4. Call Gemini again to synthesise a grounded answer.
-     5. Return structured JSON to the client.
+   Streams newline-delimited JSON events so the client can update
+   the typing indicator in real-time, matching the original UX:
+
+     {"event":"interpreted", searchQuery, specificity, topic}
+     {"event":"searching",   count}
+     {"event":"result",      answer, status, agreement,
+                             limitations, sources, searchQuery, specificity}
+     {"event":"error",       error}
    ============================================================= */
 
 const LLM_MODEL    = 'gemini-3.5-flash-lite';
 const GEMINI_BASE  = 'https://generativelanguage.googleapis.com/v1beta/models';
 const OPENALEX_URL = 'https://api.openalex.org/works';
 
-/* ── Helpers ── */
+/* ── Utilities ── */
 
 function cleanJson(t) {
   return String(t || '')
@@ -24,61 +26,47 @@ function cleanJson(t) {
     .trim();
 }
 
-function esc(v) {
-  return String(v ?? '');
-}
-
-/** Call Gemini and parse the JSON response. */
 async function llmJson(prompt, maxOutputTokens, apiKey) {
   const url = `${GEMINI_BASE}/${encodeURIComponent(LLM_MODEL)}:generateContent`;
   const res  = await fetch(url, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body:    JSON.stringify({
-      contents:       [{ role: 'user', parts: [{ text: prompt }] }],
+      contents:         [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature:        0.12,
-        responseMimeType:   'application/json',
+        temperature:      0.12,
+        responseMimeType: 'application/json',
         maxOutputTokens,
       },
     }),
   });
-
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
+  if (!res.ok)
     throw new Error(data.error?.message || `Gemini returned HTTP ${res.status}.`);
-  }
-
-  const text = (data.candidates?.[0]?.content?.parts || [])
-    .map(x => x.text || '')
-    .join('');
+  const text = (data.candidates?.[0]?.content?.parts || []).map(x => x.text || '').join('');
   return JSON.parse(cleanJson(text));
 }
 
-/** Format recent history for prompts. */
 function recentHistory(history) {
-  return (history || [])
-    .slice(-4)
-    .map(m => `${m.role}: ${m.content}`)
-    .join('\n');
+  return (history || []).slice(-4).map(m => `${m.role}: ${m.content}`).join('\n');
 }
 
-/* ── Interpretation step ── */
+/* ── Interpretation ── */
 
 function conceptVariants(term) {
   const t = String(term || '').toLowerCase();
-  const variants = [t];
+  const v = [t];
   if (/spectroscop|spectral|spectrum|spectra/.test(t))
-    variants.push('spectroscopy', 'spectrum', 'spectra', 'gaia xp');
+    v.push('spectroscopy', 'spectrum', 'spectra', 'gaia xp');
   if (/hertzsprung|hr diagram|stellar evolution/.test(t))
-    variants.push('hertzsprung', 'hr diagram', 'stellar evolution', 'main sequence');
+    v.push('hertzsprung', 'hr diagram', 'stellar evolution', 'main sequence');
   if (/stellar classification|star classification|stellar label/.test(t))
-    variants.push('stellar classification', 'star classification', 'stellar parameter', 'stellar label', 'star type');
+    v.push('stellar classification', 'star classification', 'stellar parameter', 'stellar label', 'star type');
   if (/machine learning|neural network/.test(t))
-    variants.push('machine learning', 'deep learning', 'artificial intelligence', 'neural network');
+    v.push('machine learning', 'deep learning', 'artificial intelligence', 'neural network');
   if (/astrophys|astronom/.test(t))
-    variants.push('astrophysics', 'astronomy', 'stellar');
-  return [...new Set(variants)];
+    v.push('astrophysics', 'astronomy', 'stellar');
+  return [...new Set(v)];
 }
 
 async function interpret(question, history, apiKey) {
@@ -86,23 +74,24 @@ async function interpret(question, history, apiKey) {
     `You are the query-planning step of a scholarly research assistant. ` +
     `Classify the user's question as broad or specific, then create a faithful search plan. ` +
     `Broad means a short named topic or general overview request. ` +
-    `Specific means the question contains a concrete task, data type, population, method, mechanism, comparison, outcome, or multiple linked constraints. ` +
+    `Specific means the question contains a concrete task, data type, population, method, ` +
+    `mechanism, comparison, outcome, or multiple linked constraints. ` +
     `Preserve the user's exact scientific nouns and relationships. ` +
-    `Return JSON only: {"topic":"short topic label","specificity":"broad|specific","searchQuery":"6 to 16 word scholarly keyword query","requiredTerms":["3 to 8 essential concepts or short phrases"],"intent":"short explanation"}. ` +
+    `Return JSON only: {"topic":"short topic label","specificity":"broad|specific",` +
+    `"searchQuery":"6 to 16 word scholarly keyword query",` +
+    `"requiredTerms":["3 to 8 essential concepts or short phrases"],"intent":"short explanation"}. ` +
     `Do not answer the user's question or include citations.\n\n` +
     `Recent chat:\n${recentHistory(history)}\n\nLatest message:\n${question}`;
 
   const raw = await llmJson(prompt, 320, apiKey);
 
-  /* Heuristic specificity boost */
-  const text       = String(question || '');
-  const heuristic  =
+  const text      = String(question || '');
+  const heuristic =
     (text.length > 120 ? 1 : 0) +
     (/\bhow\b|\busing\b|\bthrough\b|\bfrom\b|\bclassif|\btrain|\bcompare|\bdetect|\brecogniz/i.test(text) ? 1 : 0) +
     ((text.match(/\band\b|\bor\b|\bwith\b/gi) || []).length >= 2 ? 1 : 0);
   const specificity = raw.specificity === 'specific' || heuristic >= 2 ? 'specific' : 'broad';
 
-  /* Merge explicit terms from the raw question */
   const explicitTerms = text.match(
     /machine learning|deep learning|spectroscop\w*|spectral\w*|spectr\w*|image\w*|distant stars?|stellar classification|star classification|hertzsprung[–— -]?russell|hr diagram\w*|astronom\w*|astrophys\w*|classif\w*/gi
   ) || [];
@@ -117,18 +106,16 @@ async function interpret(question, history, apiKey) {
     .filter((x, i, a) => a.findIndex(y => y.toLowerCase() === x.toLowerCase()) === i)
     .slice(0, 8);
 
-  const searchQuery = String(raw.searchQuery || question).trim().slice(0, 260) || question;
-
   return {
     topic:        String(raw.topic || 'Research question'),
     specificity,
-    searchQuery,
+    searchQuery:  String(raw.searchQuery || question).trim().slice(0, 260) || question,
     requiredTerms,
     intent:       String(raw.intent || 'Searching related scholarly evidence.'),
   };
 }
 
-/* ── OpenAlex retrieval step ── */
+/* ── OpenAlex retrieval ── */
 
 function normalizeWork(w) {
   function authorNames(items = []) {
@@ -157,23 +144,21 @@ function normalizeWork(w) {
 }
 
 function searchVariants(question, interpretation) {
-  const clean = value =>
-    String(value || '').replace(/[?*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 260);
-  const original  = clean(question);
-  const focused   = clean(interpretation.searchQuery);
-  const concepts  = clean(
+  const clean = v => String(v || '').replace(/[?*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 260);
+  const focused  = clean(interpretation.searchQuery);
+  const concepts = clean(
     Array.isArray(interpretation.requiredTerms)
       ? interpretation.requiredTerms.filter(Boolean).slice(0, 8).join(' ')
       : ''
   );
+  const original = clean(question);
   return [...new Set([focused, concepts, original].filter(Boolean))];
 }
 
 function paperTermCoverage(paper, terms = []) {
   const text = `${paper.title} ${paper.abstract}`.toLowerCase();
   return terms.reduce(
-    (hits, term) =>
-      hits + (conceptVariants(term).some(variant => text.includes(variant)) ? 1 : 0),
+    (hits, term) => hits + (conceptVariants(term).some(v => text.includes(v)) ? 1 : 0),
     0
   );
 }
@@ -186,10 +171,9 @@ async function retrieve(question, interpretation, scholarApiKey) {
     url.searchParams.set('search',   query);
     url.searchParams.set('per-page', '20');
     url.searchParams.set('sort',     'relevance_score:desc');
-    url.searchParams.set(
-      'select',
-      'id,title,authorships,abstract_inverted_index,publication_date,publication_year,cited_by_count,relevance_score,open_access,primary_location,doi'
-    );
+    url.searchParams.set('select',
+      'id,title,authorships,abstract_inverted_index,publication_date,publication_year,' +
+      'cited_by_count,relevance_score,open_access,primary_location,doi');
     if (scholarApiKey) url.searchParams.set('api_key', scholarApiKey);
 
     const r    = await fetch(url.toString());
@@ -212,38 +196,31 @@ async function retrieve(question, interpretation, scholarApiKey) {
 
   if (!merged.length) {
     const failure = results.find(x => x.status === 'rejected');
-    throw new Error(
-      failure?.reason?.message || 'No scholarly records were returned from the full-corpus search.'
-    );
+    throw new Error(failure?.reason?.message || 'No scholarly records were returned from the full-corpus search.');
   }
 
   const terms  = Array.isArray(interpretation.requiredTerms)
-    ? interpretation.requiredTerms.filter(Boolean).slice(0, 8)
-    : [];
+    ? interpretation.requiredTerms.filter(Boolean).slice(0, 8) : [];
   const ranked = merged
     .map(p => ({ ...p, termCoverage: paperTermCoverage(p, terms) }))
-    .sort(
-      (a, b) =>
-        b.termCoverage - a.termCoverage ||
-        b.relevanceScore - a.relevanceScore ||
-        b.citations - a.citations
-    );
+    .sort((a, b) =>
+      b.termCoverage - a.termCoverage ||
+      b.relevanceScore - a.relevanceScore ||
+      b.citations - a.citations);
 
   const target  = interpretation.specificity === 'specific' ? 10 : 20;
-  const minimum =
-    interpretation.specificity === 'specific' && terms.length >= 4
-      ? Math.max(2, Math.ceil(terms.length * 0.35))
-      : 0;
+  const minimum = interpretation.specificity === 'specific' && terms.length >= 4
+    ? Math.max(2, Math.ceil(terms.length * 0.35)) : 0;
   const focused = minimum ? ranked.filter(p => p.termCoverage >= minimum) : ranked;
 
   return (focused.length >= Math.min(target, 9) ? focused : ranked).slice(0, target);
 }
 
-/* ── Synthesis step ── */
+/* ── Synthesis ── */
 
 function sourceText(p, i) {
-  const abstract = String(p.abstract || 'Abstract unavailable.').slice(0, 900);
-  return `[P${i + 1}] ${p.title}. ${p.authors} (${p.year || 'n.d.'}). ${p.venue || 'Venue unavailable'}. Abstract: ${abstract}`;
+  return `[P${i + 1}] ${p.title}. ${p.authors} (${p.year || 'n.d.'}). ` +
+    `${p.venue || 'Venue unavailable'}. Abstract: ${String(p.abstract || 'Abstract unavailable.').slice(0, 900)}`;
 }
 
 function safeAnswer(raw, papers) {
@@ -253,21 +230,15 @@ function safeAnswer(raw, papers) {
     agreement:   'No reliable agreement signal is available.',
     limitations: ['The response did not satisfy the paper-citation safety check.'],
   };
-
-  if (
-    !raw ||
-    typeof raw.answer !== 'string' ||
-    !['supported', 'mixed', 'insufficient'].includes(raw.status)
-  ) return fallback;
-
+  if (!raw || typeof raw.answer !== 'string' || !['supported', 'mixed', 'insufficient'].includes(raw.status))
+    return fallback;
   const cited = [...raw.answer.matchAll(/\[P(\d+)\]/g)].map(m => Number(m[1]));
   if (raw.status !== 'insufficient' && (!cited.length || cited.some(n => n < 1 || n > papers.length)))
     return fallback;
-
   return {
     answer:      raw.answer,
     status:      raw.status,
-    agreement:   raw.agreement  || 'No agreement statement was returned.',
+    agreement:   raw.agreement || 'No agreement statement was returned.',
     limitations: Array.isArray(raw.limitations) && raw.limitations.length
       ? raw.limitations
       : ['Abstracts and metadata do not replace full-text source review.'],
@@ -291,19 +262,16 @@ async function synthesize(question, interpretation, papers, history, apiKey) {
     `Required concepts: ${(interpretation.requiredTerms || []).join(', ')}\n\n` +
     `Current retrieved papers:\n${papers.map(sourceText).join('\n\n')}`;
 
-  const raw = await llmJson(prompt, 1000, apiKey);
-  return safeAnswer(raw, papers);
+  return safeAnswer(await llmJson(prompt, 1000, apiKey), papers);
 }
 
-/* ── Vercel handler ── */
+/* ── Vercel handler — streams NDJSON progress events ── */
 
 export default async function handler(req, res) {
-  /* Only accept POST */
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
-  /* Read env vars server-side — never exposed to the client */
   const scholarApiKey = process.env.SCHOLAR_API_KEY || '';
   const llmApiKey     = process.env.LLM_API_KEY     || '';
 
@@ -317,17 +285,32 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Provide a question with at least three characters.' });
   }
 
-  try {
-    /* Step 1 — Interpret the question */
-    const interpretation = await interpret(question.trim(), history, llmApiKey);
+  /* ── Open a chunked stream so the client sees live progress ── */
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx/proxy buffering
 
-    /* Step 2 — Retrieve scholarly papers from OpenAlex */
+  const emit = obj => res.write(JSON.stringify(obj) + '\n');
+
+  try {
+    /* Stage 1 — interpret */
+    const interpretation = await interpret(question.trim(), history, llmApiKey);
+    emit({
+      event:       'interpreted',
+      searchQuery: interpretation.searchQuery,
+      specificity: interpretation.specificity,
+      topic:       interpretation.topic,
+    });
+
+    /* Stage 2 — retrieve */
     let papers = [];
     try {
       papers = await retrieve(question.trim(), interpretation, scholarApiKey);
-    } catch (retrievalError) {
-      /* Return a graceful insufficient response rather than a hard 500 */
-      return res.status(200).json({
+      emit({ event: 'searching', count: papers.length });
+    } catch (retrievalErr) {
+      emit({
+        event:       'result',
         answer:      '**Insufficient evidence.** I could not retrieve relevant scholarly records for this interpreted topic. Try adding a population, outcome, timeframe, or study context.',
         status:      'insufficient',
         agreement:   'No source set was retrieved.',
@@ -336,21 +319,23 @@ export default async function handler(req, res) {
         searchQuery: interpretation.searchQuery,
         specificity: interpretation.specificity,
       });
+      return res.end();
     }
 
-    /* Step 3 — Synthesise answer from retrieved papers */
+    /* Stage 3 — synthesise */
     const synthesis = await synthesize(question.trim(), interpretation, papers, history, llmApiKey);
-
-    return res.status(200).json({
+    emit({
+      event:       'result',
       ...synthesis,
       sources:     papers,
       searchQuery: interpretation.searchQuery,
       specificity: interpretation.specificity,
     });
-  } catch (error) {
-    console.error('[api/chat] Unhandled error:', error);
-    return res.status(500).json({
-      error: error.message || 'An unexpected server error occurred. Please try again.',
-    });
+
+  } catch (err) {
+    console.error('[api/chat] Error:', err);
+    emit({ event: 'error', error: err.message || 'An unexpected server error occurred.' });
   }
+
+  res.end();
 }
