@@ -1,0 +1,356 @@
+/* =============================================================
+   api/chat.js — Vercel Serverless Function
+   Secure proxy: keeps SCHOLAR_API_KEY and LLM_API_KEY server-side.
+
+   Flow:
+     1. Receive { question, history } from client (POST only).
+     2. Call Gemini to interpret the question → search plan.
+     3. Query OpenAlex with the search plan variants.
+     4. Call Gemini again to synthesise a grounded answer.
+     5. Return structured JSON to the client.
+   ============================================================= */
+
+const LLM_MODEL    = 'gemini-3.5-flash-lite';
+const GEMINI_BASE  = 'https://generativelanguage.googleapis.com/v1beta/models';
+const OPENALEX_URL = 'https://api.openalex.org/works';
+
+/* ── Helpers ── */
+
+function cleanJson(t) {
+  return String(t || '')
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+}
+
+function esc(v) {
+  return String(v ?? '');
+}
+
+/** Call Gemini and parse the JSON response. */
+async function llmJson(prompt, maxOutputTokens, apiKey) {
+  const url = `${GEMINI_BASE}/${encodeURIComponent(LLM_MODEL)}:generateContent`;
+  const res  = await fetch(url, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body:    JSON.stringify({
+      contents:       [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature:        0.12,
+        responseMimeType:   'application/json',
+        maxOutputTokens,
+      },
+    }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Gemini returned HTTP ${res.status}.`);
+  }
+
+  const text = (data.candidates?.[0]?.content?.parts || [])
+    .map(x => x.text || '')
+    .join('');
+  return JSON.parse(cleanJson(text));
+}
+
+/** Format recent history for prompts. */
+function recentHistory(history) {
+  return (history || [])
+    .slice(-4)
+    .map(m => `${m.role}: ${m.content}`)
+    .join('\n');
+}
+
+/* ── Interpretation step ── */
+
+function conceptVariants(term) {
+  const t = String(term || '').toLowerCase();
+  const variants = [t];
+  if (/spectroscop|spectral|spectrum|spectra/.test(t))
+    variants.push('spectroscopy', 'spectrum', 'spectra', 'gaia xp');
+  if (/hertzsprung|hr diagram|stellar evolution/.test(t))
+    variants.push('hertzsprung', 'hr diagram', 'stellar evolution', 'main sequence');
+  if (/stellar classification|star classification|stellar label/.test(t))
+    variants.push('stellar classification', 'star classification', 'stellar parameter', 'stellar label', 'star type');
+  if (/machine learning|neural network/.test(t))
+    variants.push('machine learning', 'deep learning', 'artificial intelligence', 'neural network');
+  if (/astrophys|astronom/.test(t))
+    variants.push('astrophysics', 'astronomy', 'stellar');
+  return [...new Set(variants)];
+}
+
+async function interpret(question, history, apiKey) {
+  const prompt =
+    `You are the query-planning step of a scholarly research assistant. ` +
+    `Classify the user's question as broad or specific, then create a faithful search plan. ` +
+    `Broad means a short named topic or general overview request. ` +
+    `Specific means the question contains a concrete task, data type, population, method, mechanism, comparison, outcome, or multiple linked constraints. ` +
+    `Preserve the user's exact scientific nouns and relationships. ` +
+    `Return JSON only: {"topic":"short topic label","specificity":"broad|specific","searchQuery":"6 to 16 word scholarly keyword query","requiredTerms":["3 to 8 essential concepts or short phrases"],"intent":"short explanation"}. ` +
+    `Do not answer the user's question or include citations.\n\n` +
+    `Recent chat:\n${recentHistory(history)}\n\nLatest message:\n${question}`;
+
+  const raw = await llmJson(prompt, 320, apiKey);
+
+  /* Heuristic specificity boost */
+  const text       = String(question || '');
+  const heuristic  =
+    (text.length > 120 ? 1 : 0) +
+    (/\bhow\b|\busing\b|\bthrough\b|\bfrom\b|\bclassif|\btrain|\bcompare|\bdetect|\brecogniz/i.test(text) ? 1 : 0) +
+    ((text.match(/\band\b|\bor\b|\bwith\b/gi) || []).length >= 2 ? 1 : 0);
+  const specificity = raw.specificity === 'specific' || heuristic >= 2 ? 'specific' : 'broad';
+
+  /* Merge explicit terms from the raw question */
+  const explicitTerms = text.match(
+    /machine learning|deep learning|spectroscop\w*|spectral\w*|spectr\w*|image\w*|distant stars?|stellar classification|star classification|hertzsprung[–— -]?russell|hr diagram\w*|astronom\w*|astrophys\w*|classif\w*/gi
+  ) || [];
+
+  const requiredTerms = [
+    ...(Array.isArray(raw.requiredTerms) ? raw.requiredTerms : []),
+    ...explicitTerms,
+    ...text.split(/[,;()]|\s+and\s+|\s+through\s+/i).map(x => x.trim()).filter(x => x.length > 3),
+  ]
+    .map(x => String(x).replace(/^[^a-z0-9]+|[^a-z0-9%+–—-]+$/gi, '').trim())
+    .filter(Boolean)
+    .filter((x, i, a) => a.findIndex(y => y.toLowerCase() === x.toLowerCase()) === i)
+    .slice(0, 8);
+
+  const searchQuery = String(raw.searchQuery || question).trim().slice(0, 260) || question;
+
+  return {
+    topic:        String(raw.topic || 'Research question'),
+    specificity,
+    searchQuery,
+    requiredTerms,
+    intent:       String(raw.intent || 'Searching related scholarly evidence.'),
+  };
+}
+
+/* ── OpenAlex retrieval step ── */
+
+function normalizeWork(w) {
+  function authorNames(items = []) {
+    const names = items.map(x => x.author?.display_name).filter(Boolean);
+    return names.slice(0, 3).join(', ') + (names.length > 3 ? ' et al.' : '') || 'Authors not listed';
+  }
+  function makeAbstract(index) {
+    if (!index) return 'Abstract unavailable for this scholarly record.';
+    const words = [];
+    Object.entries(index).forEach(([w, p]) => p.forEach(i => (words[i] = w)));
+    return words.filter(Boolean).join(' ') || 'Abstract unavailable for this scholarly record.';
+  }
+  return {
+    id:             w.id || String(Math.random()),
+    title:          w.title || 'Untitled scholarly work',
+    authors:        authorNames(w.authorships),
+    abstract:       makeAbstract(w.abstract_inverted_index),
+    year:           w.publication_year || null,
+    date:           w.publication_date || null,
+    citations:      Number(w.cited_by_count || 0),
+    relevanceScore: Number(w.relevance_score || 0),
+    openAccess:     Boolean(w.open_access?.is_oa),
+    venue:          w.primary_location?.source?.display_name || null,
+    url:            w.open_access?.oa_url || w.primary_location?.landing_page_url || w.doi || w.id || '#',
+  };
+}
+
+function searchVariants(question, interpretation) {
+  const clean = value =>
+    String(value || '').replace(/[?*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 260);
+  const original  = clean(question);
+  const focused   = clean(interpretation.searchQuery);
+  const concepts  = clean(
+    Array.isArray(interpretation.requiredTerms)
+      ? interpretation.requiredTerms.filter(Boolean).slice(0, 8).join(' ')
+      : ''
+  );
+  return [...new Set([focused, concepts, original].filter(Boolean))];
+}
+
+function paperTermCoverage(paper, terms = []) {
+  const text = `${paper.title} ${paper.abstract}`.toLowerCase();
+  return terms.reduce(
+    (hits, term) =>
+      hits + (conceptVariants(term).some(variant => text.includes(variant)) ? 1 : 0),
+    0
+  );
+}
+
+async function retrieve(question, interpretation, scholarApiKey) {
+  const variants = searchVariants(question, interpretation);
+
+  const fetchVariant = async query => {
+    const url = new URL(OPENALEX_URL);
+    url.searchParams.set('search',   query);
+    url.searchParams.set('per-page', '20');
+    url.searchParams.set('sort',     'relevance_score:desc');
+    url.searchParams.set(
+      'select',
+      'id,title,authorships,abstract_inverted_index,publication_date,publication_year,cited_by_count,relevance_score,open_access,primary_location,doi'
+    );
+    if (scholarApiKey) url.searchParams.set('api_key', scholarApiKey);
+
+    const r    = await fetch(url.toString());
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.message || data.error || `OpenAlex returned HTTP ${r.status}.`);
+    return (data.results || []).map(normalizeWork);
+  };
+
+  const results = await Promise.allSettled(variants.map(fetchVariant));
+
+  const merged = [];
+  const seen   = new Set();
+  results.forEach(result => {
+    if (result.status !== 'fulfilled') return;
+    result.value.forEach(p => {
+      const key = String(p.title || p.id).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (!seen.has(key)) { seen.add(key); merged.push(p); }
+    });
+  });
+
+  if (!merged.length) {
+    const failure = results.find(x => x.status === 'rejected');
+    throw new Error(
+      failure?.reason?.message || 'No scholarly records were returned from the full-corpus search.'
+    );
+  }
+
+  const terms  = Array.isArray(interpretation.requiredTerms)
+    ? interpretation.requiredTerms.filter(Boolean).slice(0, 8)
+    : [];
+  const ranked = merged
+    .map(p => ({ ...p, termCoverage: paperTermCoverage(p, terms) }))
+    .sort(
+      (a, b) =>
+        b.termCoverage - a.termCoverage ||
+        b.relevanceScore - a.relevanceScore ||
+        b.citations - a.citations
+    );
+
+  const target  = interpretation.specificity === 'specific' ? 10 : 20;
+  const minimum =
+    interpretation.specificity === 'specific' && terms.length >= 4
+      ? Math.max(2, Math.ceil(terms.length * 0.35))
+      : 0;
+  const focused = minimum ? ranked.filter(p => p.termCoverage >= minimum) : ranked;
+
+  return (focused.length >= Math.min(target, 9) ? focused : ranked).slice(0, target);
+}
+
+/* ── Synthesis step ── */
+
+function sourceText(p, i) {
+  const abstract = String(p.abstract || 'Abstract unavailable.').slice(0, 900);
+  return `[P${i + 1}] ${p.title}. ${p.authors} (${p.year || 'n.d.'}). ${p.venue || 'Venue unavailable'}. Abstract: ${abstract}`;
+}
+
+function safeAnswer(raw, papers) {
+  const fallback = {
+    answer:      '**Insufficient evidence.** The retrieved records did not support a citation-safe answer. Review the linked papers and refine your question.',
+    status:      'insufficient',
+    agreement:   'No reliable agreement signal is available.',
+    limitations: ['The response did not satisfy the paper-citation safety check.'],
+  };
+
+  if (
+    !raw ||
+    typeof raw.answer !== 'string' ||
+    !['supported', 'mixed', 'insufficient'].includes(raw.status)
+  ) return fallback;
+
+  const cited = [...raw.answer.matchAll(/\[P(\d+)\]/g)].map(m => Number(m[1]));
+  if (raw.status !== 'insufficient' && (!cited.length || cited.some(n => n < 1 || n > papers.length)))
+    return fallback;
+
+  return {
+    answer:      raw.answer,
+    status:      raw.status,
+    agreement:   raw.agreement  || 'No agreement statement was returned.',
+    limitations: Array.isArray(raw.limitations) && raw.limitations.length
+      ? raw.limitations
+      : ['Abstracts and metadata do not replace full-text source review.'],
+  };
+}
+
+async function synthesize(question, interpretation, papers, history, apiKey) {
+  const prompt =
+    `You are Epistemia AI, a warm but concise academic research companion. ` +
+    `Answer only the user's research question. ` +
+    `Use conversation history only to understand follow-up intent; use ONLY the current supplied papers for factual claims. ` +
+    `Answer in at most 4 concise sentences or bullets. ` +
+    `Return JSON only: {"answer":"markdown","status":"supported|mixed|insufficient","agreement":"short sentence","limitations":["item"]}. ` +
+    `Every factual sentence must include valid [P1] citations tied to the supplied papers. ` +
+    `If evidence is weak or cannot answer the question, choose insufficient.\n\n` +
+    `Recent chat history:\n${recentHistory(history)}\n\n` +
+    `Current question: ${question}\n` +
+    `Interpreted topic: ${interpretation.topic}\n` +
+    `Scholarly search focus: ${interpretation.searchQuery}\n` +
+    `Search specificity: ${interpretation.specificity}\n` +
+    `Required concepts: ${(interpretation.requiredTerms || []).join(', ')}\n\n` +
+    `Current retrieved papers:\n${papers.map(sourceText).join('\n\n')}`;
+
+  const raw = await llmJson(prompt, 1000, apiKey);
+  return safeAnswer(raw, papers);
+}
+
+/* ── Vercel handler ── */
+
+export default async function handler(req, res) {
+  /* Only accept POST */
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+  }
+
+  /* Read env vars server-side — never exposed to the client */
+  const scholarApiKey = process.env.SCHOLAR_API_KEY || '';
+  const llmApiKey     = process.env.LLM_API_KEY     || '';
+
+  if (!llmApiKey) {
+    return res.status(500).json({ error: 'LLM_API_KEY is not configured on the server.' });
+  }
+
+  const { question, history } = req.body || {};
+
+  if (!question || typeof question !== 'string' || question.trim().length < 3) {
+    return res.status(400).json({ error: 'Provide a question with at least three characters.' });
+  }
+
+  try {
+    /* Step 1 — Interpret the question */
+    const interpretation = await interpret(question.trim(), history, llmApiKey);
+
+    /* Step 2 — Retrieve scholarly papers from OpenAlex */
+    let papers = [];
+    try {
+      papers = await retrieve(question.trim(), interpretation, scholarApiKey);
+    } catch (retrievalError) {
+      /* Return a graceful insufficient response rather than a hard 500 */
+      return res.status(200).json({
+        answer:      '**Insufficient evidence.** I could not retrieve relevant scholarly records for this interpreted topic. Try adding a population, outcome, timeframe, or study context.',
+        status:      'insufficient',
+        agreement:   'No source set was retrieved.',
+        limitations: ['No matching scholarly records were returned.'],
+        sources:     [],
+        searchQuery: interpretation.searchQuery,
+        specificity: interpretation.specificity,
+      });
+    }
+
+    /* Step 3 — Synthesise answer from retrieved papers */
+    const synthesis = await synthesize(question.trim(), interpretation, papers, history, llmApiKey);
+
+    return res.status(200).json({
+      ...synthesis,
+      sources:     papers,
+      searchQuery: interpretation.searchQuery,
+      specificity: interpretation.specificity,
+    });
+  } catch (error) {
+    console.error('[api/chat] Unhandled error:', error);
+    return res.status(500).json({
+      error: error.message || 'An unexpected server error occurred. Please try again.',
+    });
+  }
+}

@@ -1,0 +1,10 @@
+# Environment secrets — never commit these
+.env
+.env.local
+.env.production
+
+# Vercel build output
+.vercel
+
+# Node
+node_modules/
