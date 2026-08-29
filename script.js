@@ -15,6 +15,7 @@ const esc = v =>
 let chats    = readChats();
 let activeId = chats[0]?.id || null;
 let busy     = false;
+let pinPrompt = false;   // keep the view anchored to the newest prompt while it is answered
 
 /* ── Persistence ── */
 function uid() {
@@ -179,7 +180,50 @@ function renderFeed() {
     ? welcome()
     : chat.messages.map(messageHtml).join('');
   $('promptChips')?.querySelectorAll('button').forEach(b => b.onclick = () => send(b.textContent));
-  setTimeout(() => $('feed').lastElementChild?.scrollIntoView({ block: 'end' }), 0);
+  if (pinPrompt) setTimeout(() => scrollToLatestPrompt('auto'), 0);
+  else setTimeout(() => $('feed').lastElementChild?.scrollIntoView({ block: 'end' }), 0);
+}
+
+/* ── Scroll: jump to the newest prompt (works for desktop feed + mobile page scroll) ── */
+function feedScroller() {
+  const feed = $('feed');
+  const oy   = getComputedStyle(feed).overflowY;
+  const scrollable = (oy === 'auto' || oy === 'scroll') && feed.scrollHeight > feed.clientHeight + 2;
+  return scrollable ? feed : null;
+}
+
+function setFeedTailSpace(px) {
+  const feed = $('feed');
+  feed.style.setProperty('--tail-space', px > 0 ? `${Math.ceil(px)}px` : '0px');
+}
+
+function scrollToLatestPrompt(behavior = 'smooth') {
+  const nodes = $('feed').querySelectorAll('.message.user');
+  const el    = nodes[nodes.length - 1];
+  if (!el) return;
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const gap       = 12;
+    const container = feedScroller() || document.scrollingElement || document.documentElement;
+    const usesFeed  = container === $('feed');
+    const bar       = document.querySelector('.mbar');
+    const barH      = !usesFeed && bar && getComputedStyle(bar).display !== 'none' ? bar.offsetHeight : 0;
+    const anchorTop = usesFeed ? container.getBoundingClientRect().top : 0;
+
+    const target = container.scrollTop + el.getBoundingClientRect().top - anchorTop - barH - gap;
+    const max    = container.scrollHeight - container.clientHeight;
+
+    // Add just enough tail space so the newest prompt can actually reach the top.
+    if (target > max) {
+      setFeedTailSpace(target - max);
+      requestAnimationFrame(() => {
+        const m = container.scrollHeight - container.clientHeight;
+        container.scrollTo({ top: Math.max(0, Math.min(target, m)), behavior });
+      });
+      return;
+    }
+    container.scrollTo({ top: Math.max(0, target), behavior });
+  }));
 }
 
 /* ── Render: sources panel ── */
@@ -255,12 +299,14 @@ async function send(value) {
   $('prompt').value        = '';
   $('prompt').style.height = 'auto';
   busy                     = true;
+  pinPrompt                = true;
   $('sendButton').disabled = true;
   $('prompt').disabled     = true;
   renderAll();
 
   // Insert the typing bubble immediately so the user sees activity
   $('feed').insertAdjacentHTML('beforeend', messageHtml({ role: 'typing' }));
+  scrollToLatestPrompt();
 
   /* ── Paced research stages ────────────────────────────────────────────
      The server can finish a stage in a few hundred milliseconds. Each stage
@@ -398,6 +444,8 @@ async function send(value) {
     addError(error.message);
   } finally {
     busy                     = false;
+    pinPrompt                = false;
+  setFeedTailSpace(0);
     $('sendButton').disabled = false;
     $('prompt').disabled     = false;
     $('prompt').focus();
