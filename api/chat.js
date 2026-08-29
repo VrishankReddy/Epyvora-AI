@@ -80,10 +80,14 @@ async function interpret(question, history, apiKey) {
     `Return JSON only: {"topic":"short topic label","specificity":"broad|specific",` +
     `"searchQuery":"6 to 16 word scholarly keyword query",` +
     `"requiredTerms":["3 to 8 essential concepts or short phrases"],"intent":"short explanation"}. ` +
+    `Work carefully and deliberately: before writing the JSON, mentally restate the question, ` +
+    `list every constraint it contains (task, data type, population, method, mechanism, comparison, ` +
+    `outcome, timeframe), and check that your search plan covers each one. Accuracy of the plan ` +
+    `matters far more than speed. ` +
     `Do not answer the user's question or include citations.\n\n` +
     `Recent chat:\n${recentHistory(history)}\n\nLatest message:\n${question}`;
 
-  const raw = await llmJson(prompt, 320, apiKey);
+  const raw = await llmJson(prompt, 800, apiKey);
 
   const text      = String(question || '');
   const heuristic =
@@ -112,6 +116,47 @@ async function interpret(question, history, apiKey) {
     searchQuery:  String(raw.searchQuery || question).trim().slice(0, 260) || question,
     requiredTerms,
     intent:       String(raw.intent || 'Searching related scholarly evidence.'),
+  };
+}
+
+/* ── Second pass: critique and sharpen the search plan ── */
+
+async function refinePlan(question, interpretation, apiKey) {
+  const prompt =
+    `You are the plan-review step of a scholarly research assistant. ` +
+    `Critically review the draft search plan below against the user's question. ` +
+    `Check for: missing constraints, terms the user never asked about, over-broad wording, ` +
+    `missing synonyms or field-standard terminology, and whether the query would surface ` +
+    `papers that actually answer the question. ` +
+    `Then return an improved plan. Keep the user's exact scientific nouns and relationships. ` +
+    `Return JSON only: {"searchQuery":"6 to 18 word scholarly keyword query",` +
+    `"requiredTerms":["3 to 8 essential concepts"],"topic":"short topic label",` +
+    `"specificity":"broad|specific","rationale":"one short sentence on what you changed"}.\n\n` +
+    `User question: ${question}\n\n` +
+    `Draft plan:\n${JSON.stringify(interpretation, null, 2)}`;
+
+  let raw;
+  try { raw = await llmJson(prompt, 700, apiKey); }
+  catch { return interpretation; }
+
+  const terms = [
+    ...(Array.isArray(raw.requiredTerms) ? raw.requiredTerms : []),
+    ...(interpretation.requiredTerms || []),
+  ]
+    .map(x => String(x || '').trim())
+    .filter(Boolean)
+    .filter((x, i, a) => a.findIndex(y => y.toLowerCase() === x.toLowerCase()) === i)
+    .slice(0, 8);
+
+  return {
+    ...interpretation,
+    topic:         String(raw.topic || interpretation.topic),
+    specificity:   raw.specificity === 'specific' || raw.specificity === 'broad'
+                     ? raw.specificity : interpretation.specificity,
+    searchQuery:   String(raw.searchQuery || interpretation.searchQuery).trim().slice(0, 280)
+                     || interpretation.searchQuery,
+    requiredTerms: terms.length ? terms : interpretation.requiredTerms,
+    rationale:     String(raw.rationale || 'Search plan reviewed and confirmed.'),
   };
 }
 
@@ -250,6 +295,7 @@ async function synthesize(question, interpretation, papers, history, apiKey) {
     `You are Epistemia AI, a warm but concise academic research companion. ` +
     `Answer only the user's research question. ` +
     `Use conversation history only to understand follow-up intent; use ONLY the current supplied papers for factual claims. ` +
+    `Read every supplied paper carefully before answering; weigh agreement and disagreement across them rather than paraphrasing the first match. ` +
     `Answer in at most 4 concise sentences or bullets. ` +
     `Return JSON only: {"answer":"markdown","status":"supported|mixed|insufficient","agreement":"short sentence","limitations":["item"]}. ` +
     `Every factual sentence must include valid [P1] citations tied to the supplied papers. ` +
@@ -262,7 +308,7 @@ async function synthesize(question, interpretation, papers, history, apiKey) {
     `Required concepts: ${(interpretation.requiredTerms || []).join(', ')}\n\n` +
     `Current retrieved papers:\n${papers.map(sourceText).join('\n\n')}`;
 
-  return safeAnswer(await llmJson(prompt, 1000, apiKey), papers);
+  return safeAnswer(await llmJson(prompt, 1400, apiKey), papers);
 }
 
 /* ── Vercel handler — streams NDJSON progress events ── */
@@ -294,13 +340,27 @@ export default async function handler(req, res) {
   const emit = obj => res.write(JSON.stringify(obj) + '\n');
 
   try {
+    /* Stage 0 — tell the client we have started reading the question */
+    emit({ event: 'planning' });
+
     /* Stage 1 — interpret */
-    const interpretation = await interpret(question.trim(), history, llmApiKey);
+    const draft = await interpret(question.trim(), history, llmApiKey);
     emit({
       event:       'interpreted',
+      searchQuery: draft.searchQuery,
+      specificity: draft.specificity,
+      topic:       draft.topic,
+    });
+
+    /* Stage 1b — review and sharpen the plan before searching */
+    const interpretation = await refinePlan(question.trim(), draft, llmApiKey);
+    emit({
+      event:       'refined',
       searchQuery: interpretation.searchQuery,
       specificity: interpretation.specificity,
       topic:       interpretation.topic,
+      rationale:   interpretation.rationale || '',
+      terms:       interpretation.requiredTerms || [],
     });
 
     /* Stage 2 — retrieve */
@@ -308,6 +368,7 @@ export default async function handler(req, res) {
     try {
       papers = await retrieve(question.trim(), interpretation, scholarApiKey);
       emit({ event: 'searching', count: papers.length });
+      emit({ event: 'reading', count: papers.length });
     } catch (retrievalErr) {
       emit({
         event:       'result',

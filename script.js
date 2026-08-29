@@ -136,7 +136,7 @@ function messageHtml(m) {
         <div class="message-title">Understanding your question</div>
         <div class="typing"><i></i><i></i><i></i></div>
         <div class="status-row" id="researchStage">
-          Interpreting the topic before searching scholarly sources.
+          Reading your question closely and mapping out what evidence it needs.
         </div>
       </div>
     </article>`;
@@ -262,6 +262,35 @@ async function send(value) {
   // Insert the typing bubble immediately so the user sees activity
   $('feed').insertAdjacentHTML('beforeend', messageHtml({ role: 'typing' }));
 
+  /* ── Paced research stages ────────────────────────────────────────────
+     The server can finish a stage in a few hundred milliseconds. Each stage
+     is held on screen for a minimum dwell time and rendered strictly in
+     order, so the reader can actually see the interpreted focus point while
+     the search and synthesis continue in the background.                */
+  const MIN_STAGE_MS = {
+    planning:    2000,
+    interpreted: 3600,
+    refined:     3400,
+    searching:   2400,
+    reading:     2800,
+    result:         0,
+  };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let stageChain = Promise.resolve();
+
+  const stage = (key, render) => {
+    stageChain = stageChain.then(async () => {
+      try { render(); } catch { /* stage rendering is best-effort */ }
+      const wait = MIN_STAGE_MS[key] ?? 1500;
+      if (wait) await sleep(wait);
+    });
+    return stageChain;
+  };
+  const setStage = (key, html) =>
+    stage(key, () => { const el = $('researchStage'); if (el) el.innerHTML = html; });
+  const setTitle = text =>
+    { const el = document.querySelector('#typing .message-title'); if (el) el.textContent = text; };
+
   try {
     const res = await fetch('/api/chat', {
       method:  'POST',
@@ -295,41 +324,62 @@ async function send(value) {
         let evt;
         try { evt = JSON.parse(trimmed); } catch { continue; }
 
-        /* ── Stage 1: interpretation complete → update typing bubble text ── */
+        /* ── Stage 0: server started planning ── */
+        if (evt.event === 'planning') {
+          setStage('planning',
+            'Reading your question closely and mapping out what evidence it needs.');
+        }
+
+        /* ── Stage 1: first interpretation → show the focus point ── */
         if (evt.event === 'interpreted') {
-          const stage = $('researchStage');
-          if (stage) {
-            stage.innerHTML =
-              `<span class="interpretation">Focus: ${esc(evt.searchQuery)}</span> · ` +
-              (evt.specificity === 'specific'
-                ? 'narrowing to the strongest matching papers'
-                : 'searching broadly across related papers') + '.';
-          }
+          setStage('interpreted',
+            `<span class="interpretation">Focus: ${esc(evt.searchQuery)}</span> · ` +
+            (evt.specificity === 'specific'
+              ? 'reading this as a specific question with linked constraints'
+              : 'reading this as a broad topic overview') + '.');
         }
 
-        /* ── Stage 2: papers retrieved → update typing bubble with count ── */
+        /* ── Stage 1b: plan reviewed and sharpened ── */
+        if (evt.event === 'refined') {
+          setStage('refined',
+            `<span class="interpretation">Refined focus: ${esc(evt.searchQuery)}</span> · ` +
+            (evt.rationale ? esc(evt.rationale) + ' ' : '') +
+            'Now searching the scholarly index.');
+        }
+
+        /* ── Stage 2: papers retrieved ── */
         if (evt.event === 'searching') {
-          const stage = $('researchStage');
-          if (stage) {
-            stage.textContent =
-              `Searched the full scholarly index and selected ${evt.count} ` +
-              `${evt.count === 1 ? 'paper' : 'papers'}. Synthesising the retrieved evidence.`;
-          }
+          setStage('searching',
+            `Searched the full scholarly index and selected ${evt.count} ` +
+            `${evt.count === 1 ? 'paper' : 'papers'} for close reading.`);
         }
 
-        /* ── Stage 3: final answer ── */
-        if (evt.event === 'result') {
-          chat.messages.push({
-            role:        'assistant',
-            content:     evt.answer,
-            status:      evt.status,
-            agreement:   evt.agreement,
-            limitations: evt.limitations,
-            sources:     evt.sources     || [],
-            searchQuery: evt.searchQuery || '',
+        /* ── Stage 2b: reading the retrieved evidence ── */
+        if (evt.event === 'reading') {
+          stage('reading', () => {
+            setTitle('Reading the evidence');
+            const el = $('researchStage');
+            if (el) el.textContent =
+              `Reading ${evt.count} ${evt.count === 1 ? 'abstract' : 'abstracts'}, ` +
+              'weighing agreement and disagreement before answering.';
           });
-          save();
-          renderAll();
+        }
+
+        /* ── Stage 3: final answer (held until earlier stages have shown) ── */
+        if (evt.event === 'result') {
+          stage('result', () => {
+            chat.messages.push({
+              role:        'assistant',
+              content:     evt.answer,
+              status:      evt.status,
+              agreement:   evt.agreement,
+              limitations: evt.limitations,
+              sources:     evt.sources     || [],
+              searchQuery: evt.searchQuery || '',
+            });
+            save();
+            renderAll();
+          });
         }
 
         /* ── Server-side error event ── */
@@ -339,7 +389,11 @@ async function send(value) {
       }
     }
 
+    // Let every queued stage (including the final answer) finish rendering
+    await stageChain;
+
   } catch (error) {
+    try { await stageChain; } catch { /* ignore stage errors */ }
     $('typing')?.remove();
     addError(error.message);
   } finally {
