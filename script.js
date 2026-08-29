@@ -261,7 +261,6 @@ async function send(value) {
 
   // Insert the typing bubble immediately so the user sees activity
   $('feed').insertAdjacentHTML('beforeend', messageHtml({ role: 'typing' }));
-  $('typing')?.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   /* ── Paced research stages ────────────────────────────────────────────
      The server can finish a stage in a few hundred milliseconds. Each stage
@@ -282,7 +281,6 @@ async function send(value) {
   const stage = (key, render) => {
     stageChain = stageChain.then(async () => {
       try { render(); } catch { /* stage rendering is best-effort */ }
-      $('typing')?.scrollIntoView({ block: 'end', behavior: 'smooth' });
       const wait = MIN_STAGE_MS[key] ?? 1500;
       if (wait) await sleep(wait);
     });
