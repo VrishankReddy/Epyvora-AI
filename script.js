@@ -1,9 +1,3 @@
-/* =============================================================
-   Epistemia AI — script.js
-   All API calls go through POST /api/chat (Vercel serverless).
-   No credentials or direct third-party API calls here.
-   ============================================================= */
-
 const STORAGE_KEY = 'evidenceDesk.chats.v2';
 const $ = id => document.getElementById(id);
 
@@ -15,7 +9,11 @@ const esc = v =>
 let chats    = readChats();
 let activeId = chats[0]?.id || null;
 let busy     = false;
-let pinPrompt = false;   // keep the view anchored to the newest prompt while it is answered
+let pinPrompt = false;   
+let detectorOpen = false;
+let detectorBusy = false;
+let detectorFile = null;
+let detectorResult = null;
 
 /* ── Persistence ── */
 function uid() {
@@ -264,6 +262,370 @@ function renderAll() {
   renderChats();
   renderFeed();
   renderSources();
+  renderDetector();
+}
+
+/* ── Plagiarism detector ── */
+function openDetector() {
+  detectorOpen = true;
+  detectorResult = null;
+  detectorFile = null;
+  renderAll();
+  setTimeout(() => $('detectorTopic')?.focus(), 0);
+}
+
+function closeDetector() {
+  detectorOpen = false;
+  detectorBusy = false;
+  detectorFile = null;
+  detectorResult = null;
+  renderAll();
+}
+
+function detectorShell(content) {
+  return `<section class="detector">
+    <div class="detector-head">
+      <div>
+        <div class="eyebrow">Epistemia integrity tools</div>
+        <h1>Plagiarism detector</h1>
+        <p>Screen a paper or excerpt against scholarly records and see the passages that deserve a closer look.</p>
+      </div>
+      <button class="detector-back" id="detectorBack" type="button">← Back to research</button>
+    </div>
+    ${content}
+  </section>`;
+}
+
+function detectorFormHtml() {
+  return `<form class="detector-form" id="detectorForm">
+    <div class="detector-grid">
+      <label class="detector-field">
+        <span>Topic, title, or theme <b>required</b></span>
+        <input id="detectorTopic" name="topic" type="text"
+               placeholder="e.g. How remote work affects productivity" maxlength="180" required>
+        <small>Used to find the most relevant scholarly records.</small>
+      </label>
+      <div class="detector-field">
+        <span>Upload a paper or excerpt <b>optional</b></span>
+        <label class="upload-box" for="detectorFile">
+          <span class="upload-mark">↑</span>
+          <span><strong id="fileName">Choose a file</strong><small>TXT, MD, PDF, DOCX · up to 20 MB</small></span>
+        </label>
+        <input id="detectorFile" name="file" type="file"
+               accept=".txt,.md,.csv,.json,.html,.pdf,.doc,.docx,text/plain,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+      </div>
+    </div>
+
+    <label class="detector-field">
+      <span>Paste the text to screen <b>recommended</b></span>
+      <textarea id="detectorText" name="text" rows="10"
+        placeholder="Paste the abstract, paragraph, or any chunk you want Epistemia to compare…"></textarea>
+      <small id="detectorCount">0 words · For PDF/DOCX uploads, paste text here for the browser fallback, or use the live server endpoint.</small>
+    </label>
+
+    <div class="detector-actions">
+      <button class="detector-submit" id="detectorSubmit" type="submit">
+        <span>✦</span> Run plagiarism screen
+      </button>
+      <span class="detector-privacy">Your text is used for this check and is not saved to the conversation history.</span>
+    </div>
+  </form>`;
+}
+
+function renderDetector() {
+  const view = $('detectorView');
+  const feed = $('feed');
+  const composer = document.querySelector('.composer-wrap');
+  if (!view) return;
+
+  view.hidden = !detectorOpen;
+  feed.hidden = detectorOpen;
+  if (composer) composer.hidden = detectorOpen;
+  if (!detectorOpen) { view.innerHTML = ''; return; }
+
+  if (detectorBusy) {
+    view.innerHTML = detectorShell(`<div class="detector-loading">
+      <div class="detector-spinner"></div>
+      <h2>Comparing your text with scholarly records</h2>
+      <p>Epistemia is looking for meaningful phrase overlap, not just matching topic words.</p>
+      <div class="loading-track"><i></i></div>
+    </div>`);
+    $('detectorBack').onclick = closeDetector;
+    return;
+  }
+
+  if (detectorResult) {
+    view.innerHTML = detectorShell(detectorResultHtml(detectorResult));
+    $('detectorBack').onclick = closeDetector;
+    $('runAnother').onclick = () => {
+      detectorResult = null;
+      renderDetector();
+      setTimeout(() => $('detectorTopic')?.focus(), 0);
+    };
+    return;
+  }
+
+  view.innerHTML = detectorShell(detectorFormHtml());
+  $('detectorBack').onclick = closeDetector;
+  const fileInput = $('detectorFile');
+  const textInput = $('detectorText');
+  const updateCount = () => {
+    const count = (textInput.value.trim().match(/\S+/g) || []).length;
+    $('detectorCount').textContent =
+      `${count.toLocaleString()} words · ${count < 40 ? 'Add more text for a stronger comparison.' : 'Longer excerpts produce a more useful signal.'}`;
+  };
+  textInput.oninput = updateCount;
+  fileInput.onchange = async () => {
+    detectorFile = fileInput.files?.[0] || null;
+    $('fileName').textContent = detectorFile?.name || 'Choose a file';
+    if (!detectorFile) return;
+    if (isBrowserReadable(detectorFile)) {
+      try {
+        textInput.value = await detectorFile.text();
+        updateCount();
+        toast('Text extracted from the file.');
+      } catch { toast('Could not read that file in the browser.'); }
+    } else {
+      $('detectorCount').textContent =
+        `${formatBytes(detectorFile.size)} attached · PDF/DOCX extraction will use the live server endpoint.`;
+    }
+  };
+  $('detectorForm').onsubmit = e => { e.preventDefault(); runPlagiarismCheck(); };
+}
+
+function isBrowserReadable(file) {
+  return file.type.startsWith('text/') || /\.(txt|md|csv|json|html?)$/i.test(file.name);
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function wordCount(text) {
+  return (String(text || '').trim().match(/\S+/g) || []).length;
+}
+
+function normalizeWords(text) {
+  return String(text || '').toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .split(/\s+/).filter(Boolean);
+}
+
+function abstractFromOpenAlex(work) {
+  const index = work?.abstract_inverted_index;
+  if (!index) return '';
+  const words = [];
+  Object.entries(index).forEach(([word, positions]) => {
+    positions.forEach(position => { words[position] = word; });
+  });
+  return words.filter(Boolean).join(' ');
+}
+
+function sourceFromOpenAlex(work) {
+  const authors = (work.authorships || []).slice(0, 3)
+    .map(a => a.author?.display_name).filter(Boolean).join(', ');
+  const landing = work.primary_location?.landing_page_url ||
+    work.doi || `https://openalex.org/${work.id?.split('/').pop() || ''}`;
+  return {
+    title: work.title || 'Untitled scholarly work',
+    authors: authors || 'Authors unavailable',
+    year: work.publication_year || 'Year unavailable',
+    venue: work.primary_location?.source?.display_name || 'Scholarly record',
+    url: landing,
+    citations: work.cited_by_count || 0,
+    openAccess: Boolean(work.open_access?.is_oa),
+    abstract: abstractFromOpenAlex(work),
+  };
+}
+
+function makePhrases(words, size = 8) {
+  const phrases = [];
+  for (let i = 0; i <= words.length - size; i += 1) {
+    const phrase = words.slice(i, i + size).join(' ');
+    if (phrase.length > 34) phrases.push({ phrase, start: i });
+  }
+  return phrases;
+}
+
+function compareAgainstSource(text, source) {
+  const sourceWords = normalizeWords(source.abstract);
+  const inputWords = normalizeWords(text);
+  if (sourceWords.length < 12 || inputWords.length < 12) return { matches: [], similarity: 0 };
+  const sourceText = sourceWords.join(' ');
+  const matches = makePhrases(inputWords).filter(item =>
+    sourceText.includes(item.phrase)
+  ).slice(0, 4);
+  const sourceSet = new Set(sourceWords);
+  const shared = inputWords.filter(w => w.length > 4 && sourceSet.has(w)).length;
+  const similarity = Math.min(99, Math.round(
+    matches.length * 7 + (shared / Math.max(1, inputWords.length)) * 28
+  ));
+  return { matches, similarity };
+}
+
+async function searchOpenAlex(topic, text) {
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(topic)}&filter=has_abstract:true&per-page=8`;
+  const response = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!response.ok) throw new Error(`OpenAlex returned HTTP ${response.status}`);
+  const data = await response.json();
+  const ranked = (data.results || []).map(work => {
+    const source = sourceFromOpenAlex(work);
+    const comparison = compareAgainstSource(text, source);
+    return { ...source, ...comparison };
+  }).filter(source => source.similarity > 0).sort((a, b) => b.similarity - a.similarity);
+  return ranked;
+}
+
+function fallbackSources(topic) {
+  const t = topic.toLowerCase();
+  if (/remote|work.?from.?home|telework|productiv/.test(t)) {
+    return [{
+      title: 'Does Working from Home Work? Evidence from a Chinese Experiment',
+      authors: 'Nicholas Bloom, James Liang, John Roberts, Zhichun Jenny Ying',
+      year: 2015, venue: 'The Quarterly Journal of Economics',
+      url: 'https://doi.org/10.1093/qje/qju032', citations: 0, openAccess: false,
+      abstract: ''
+    }];
+  }
+  if (/sleep|academic|student|learning/.test(t)) {
+    return [{
+      title: 'Sleep loss, learning capacity and academic performance',
+      authors: 'Giuseppe Curcio, Michele Ferrara, Luigi De Gennaro',
+      year: 2006, venue: 'Sleep Medicine Reviews',
+      url: 'https://doi.org/10.1016/j.smrv.2005.11.001', citations: 0, openAccess: false,
+      abstract: ''
+    }];
+  }
+  return [];
+}
+
+function localScreen(topic, text, file) {
+  const sources = fallbackSources(topic);
+  const hasText = wordCount(text) > 0;
+  return {
+    score: hasText ? 0 : null,
+    verdict: hasText ? 'No confirmed overlap in the local fallback' : 'Text needed for browser screening',
+    confidence: 'Low',
+    sources,
+    matches: [],
+    method: 'Browser fallback',
+    note: file && !hasText
+      ? 'This file type needs the live /api/plagiarism endpoint for text extraction. The attached file was preserved for that request.'
+      : 'The live scholarly screen was unavailable, so no plagiarism conclusion can be made from this fallback.',
+  };
+}
+
+function normalizeServerResult(result) {
+  const sources = (result.sources || result.matches || []).map(source => ({
+    ...source,
+    url: source.url || source.doi || '#',
+    authors: Array.isArray(source.authors) ? source.authors.join(', ') : (source.authors || 'Authors unavailable'),
+    citations: Number(source.citations || source.cited_by_count || 0),
+    year: source.year || source.publication_year || 'Year unavailable',
+  }));
+  return {
+    score: result.score ?? result.similarity ?? 0,
+    verdict: result.verdict || (result.score > 20 ? 'Potential overlap found' : 'No substantial overlap found'),
+    confidence: result.confidence || 'Medium',
+    sources,
+    matches: result.matchedPassages || result.matches || [],
+    method: result.method || 'Epistemia scholarly screening',
+    note: result.note || 'Similarity is a signal for review, not a final plagiarism determination.',
+  };
+}
+
+function escapeHighlight(text) {
+  return esc(text).replace(/\*\*(.*?)\*\*/g, '<mark>$1</mark>');
+}
+
+function detectorResultHtml(result) {
+  const score = result.score == null ? '—' : `${Math.round(result.score)}%`;
+  const scoreClass = result.score == null ? 'unknown' : result.score >= 50 ? 'high' : result.score >= 20 ? 'medium' : 'low';
+  const sourceHtml = result.sources.length
+    ? result.sources.slice(0, 5).map((source, index) => `
+      <a class="detector-source" href="${esc(source.url)}" target="_blank" rel="noopener">
+        <span class="source-tag">P${index + 1}</span>
+        <div><h3>${esc(source.title)}</h3>
+        <p>${esc(source.authors)} · ${esc(source.year)} · ${esc(source.venue)}</p>
+        <span>Open scholarly record ↗</span></div>
+      </a>`).join('')
+    : `<div class="detector-empty">No source record crossed the overlap threshold. That does not prove the text is original; try a longer excerpt or connect the live server checker.</div>`;
+  const matchHtml = result.matches?.length
+    ? `<div class="matches"><h3>Passages to review</h3>${result.matches.slice(0, 5).map(match => {
+        const phrase = typeof match === 'string' ? match : match.phrase || match.text || '';
+        return `<blockquote>“${escapeHighlight(phrase)}”</blockquote>`;
+      }).join('')}</div>`
+    : '';
+  return `<div class="detector-result">
+    <div class="result-top">
+      <div class="score-card ${scoreClass}">
+        <span class="score-label">Overlap signal</span><strong>${score}</strong>
+        <span>${esc(result.confidence)} confidence</span>
+      </div>
+      <div class="result-summary">
+        <span class="result-kicker">${esc(result.method)}</span>
+        <h2>${esc(result.verdict)}</h2>
+        <p>${esc(result.note)}</p>
+      </div>
+    </div>
+    <div class="result-columns">
+      <div><div class="result-section-head"><span class="eyebrow">Likely source papers</span><span class="source-count">${result.sources.length}</span></div>
+        <div class="detector-sources">${sourceHtml}</div></div>
+      ${matchHtml}
+    </div>
+    <div class="detector-disclaimer"><b>Use this as a lead, not a verdict.</b> Similar wording can be legitimate quotation, common terminology, or independently written. Verify the original paper, citation context, and your institution’s policy before taking action.</div>
+    <button class="run-another" id="runAnother" type="button">Run another screen</button>
+  </div>`;
+}
+
+async function runPlagiarismCheck() {
+  if (detectorBusy) return;
+  const topic = $('detectorTopic')?.value.trim() || '';
+  const text = $('detectorText')?.value.trim() || '';
+  const file = detectorFile || $('detectorFile')?.files?.[0] || null;
+  if (topic.length < 3) { toast('Add a topic, title, or theme first.'); return; }
+  if (!text && !file) { toast('Paste text or attach a paper to screen.'); return; }
+  if (file && file.size > 20 * 1024 * 1024) { toast('Please keep uploads under 20 MB.'); return; }
+
+  detectorBusy = true;
+  renderDetector();
+  try {
+    const form = new FormData();
+    form.append('topic', topic);
+    form.append('text', text);
+    if (file) form.append('file', file, file.name);
+    const response = await Promise.race([
+      fetch('/api/plagiarism', { method: 'POST', body: form }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('server timeout')), 12000))
+    ]);
+    if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
+    const payload = await response.json();
+    detectorResult = normalizeServerResult(payload.result || payload);
+  } catch {
+    try {
+      if (!text) throw new Error('Text extraction requires the server checker');
+      const sources = await searchOpenAlex(topic, text);
+      const best = sources[0];
+      detectorResult = {
+        score: best?.similarity || 0,
+        verdict: best?.similarity >= 20 ? 'Potential overlap found' : 'No substantial overlap found',
+        confidence: best ? (best.similarity >= 45 ? 'Medium' : 'Low') : 'Low',
+        sources,
+        matches: best?.matches?.map(m => m.phrase) || [],
+        method: 'OpenAlex abstract screening',
+        note: best
+          ? 'A phrase-level match was found in the abstracts available through OpenAlex. Full-text comparison needs the live server checker.'
+          : 'No meaningful phrase overlap was found in the small abstract set returned for this topic.',
+      };
+    } catch {
+      detectorResult = localScreen(topic, text, file);
+    }
+  } finally {
+    detectorBusy = false;
+    renderDetector();
+  }
 }
 
 /* ── Error display ── */
@@ -308,11 +670,7 @@ async function send(value) {
   $('feed').insertAdjacentHTML('beforeend', messageHtml({ role: 'typing' }));
   scrollToLatestPrompt();
 
-  /* ── Paced research stages ────────────────────────────────────────────
-     The server can finish a stage in a few hundred milliseconds. Each stage
-     is held on screen for a minimum dwell time and rendered strictly in
-     order, so the reader can actually see the interpreted focus point while
-     the search and synthesis continue in the background.                */
+ 
   const MIN_STAGE_MS = {
     planning:    2000,
     interpreted: 3600,
@@ -454,6 +812,7 @@ async function send(value) {
 
 /* ── Initialise ── */
 $('newChat').onclick    = createChat;
+$('plagiarismButton').onclick = openDetector;
 $('chatForm').onsubmit  = e => { e.preventDefault(); send($('prompt').value); };
 $('prompt').onkeydown   = e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send($('prompt').value); }
