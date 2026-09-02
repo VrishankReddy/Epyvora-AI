@@ -9,16 +9,7 @@ const esc = v =>
 let chats    = readChats();
 let activeId = chats[0]?.id || null;
 let busy     = false;
-let pinPrompt = false;
-
-/* ── Research Galaxy state ── */
-let galaxyData = { nodes: [], links: [] };
-let galaxyFilter = null;
-let galaxySelectedId = null;
-let galaxySimulation = null;
-let galaxyZoom = null;
-let galaxyZoomGroup = null;
-let galaxySvg = null;
+let pinPrompt = false;   
 
 /* ── Persistence ── */
 function uid() {
@@ -35,164 +26,6 @@ function save() {
 }
 function active() {
   return chats.find(c => c.id === activeId);
-}
-
-/* ── Research Galaxy extraction ── */
-const GALAXY_COLORS = {
-  concept: '#8b5bb1',
-  paper: '#4c8ec8',
-  method: '#5eaa78',
-  critique: '#d47a42',
-};
-
-function galaxyNodeId(type, label) {
-  return `${type}:${String(label).toLowerCase().trim()
-    .replace(/&amp;/g, '&')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')}`;
-}
-
-function paperNodeLabel(index, paper) {
-  const authors = String(paper?.authors || '').split(/[;,]/)[0].trim();
-  const year = paper?.year || paper?.date || '';
-  const title = String(paper?.title || '').trim();
-  const shortTitle = title.length > 42 ? `${title.slice(0, 42).trim()}…` : title;
-  const descriptor = authors && year ? `${authors} ${year}` : (shortTitle || `Paper ${index + 1}`);
-  return `[P${index + 1}] ${descriptor}`;
-}
-
-function getOrCreateGalaxyNode(map, type, label, meta = {}) {
-  const cleanLabel = String(label || '').replace(/\s+/g, ' ').trim();
-  if (!cleanLabel) return null;
-  const id = galaxyNodeId(type, cleanLabel);
-  if (!map.has(id)) {
-    map.set(id, { id, label: cleanLabel, type, count: 1, ...meta });
-  } else {
-    map.get(id).count += 1;
-  }
-  return map.get(id);
-}
-
-function addGalaxyLink(links, source, target, relation) {
-  if (!source || !target || source.id === target.id) return;
-  const key = `${source.id}|${target.id}|${relation}`;
-  if (!links.some(link => link._key === key)) {
-    links.push({ source: source.id, target: target.id, relation, _key: key });
-  }
-}
-
-function rebuildGalaxyData() {
-  const nodeMap = new Map();
-  const links = [];
-  const messages = active()?.messages || [];
-  const methodPattern = /\b(RCT|randomized controlled trial|meta-analysis|systematic review|cohort study|cross-sectional|longitudinal|qualitative|quantitative|case-control)\b/gi;
-  const contradictionPattern = /\b(contradict|disagree|conflict|mixed evidence|mixed results|limitation|caveat|inconclusive)\b/i;
-
-  messages.filter(m => m.role === 'assistant' && m.content).forEach((m, messageIndex) => {
-    const paperNodes = (m.sources || []).map((paper, i) =>
-      getOrCreateGalaxyNode(nodeMap, 'paper', paperNodeLabel(i, paper), {
-        title: paper?.title || '',
-        authors: paper?.authors || '',
-        year: paper?.year || paper?.date || '',
-        url: paper?.url || '',
-      })
-    ).filter(Boolean);
-
-    // Keep cited papers visible even if a server response omitted source metadata.
-    const citedIndexes = [...String(m.content).matchAll(/\[P(\d+)\]/gi)]
-      .map(match => Number(match[1]) - 1)
-      .filter(index => index >= 0);
-    citedIndexes.forEach(index => {
-      if (!paperNodes[index]) {
-        paperNodes[index] = getOrCreateGalaxyNode(nodeMap, 'paper', `[P${index + 1}] Paper ${index + 1}`);
-      }
-    });
-
-    const conceptNodes = [];
-    for (const match of String(m.content).matchAll(/\*\*(.*?)\*\*/g)) {
-      const node = getOrCreateGalaxyNode(nodeMap, 'concept', match[1]);
-      if (node && !conceptNodes.some(existing => existing.id === node.id)) conceptNodes.push(node);
-    }
-    const methodNodes = [];
-    for (const match of String(m.content).matchAll(methodPattern)) {
-      const node = getOrCreateGalaxyNode(nodeMap, 'method', match[1]);
-      if (node && !methodNodes.some(existing => existing.id === node.id)) methodNodes.push(node);
-    }
-
-    const focus = String(m.searchQuery || '').trim();
-    const focusNode = focus ? getOrCreateGalaxyNode(nodeMap, 'concept', focus, { isFocus: true }) : null;
-    const relation = (m.status === 'mixed' || contradictionPattern.test(m.content) || contradictionPattern.test(m.agreement || ''))
-      ? 'contradicts' : 'supports';
-
-    [...conceptNodes, ...methodNodes, ...(focusNode ? [focusNode] : [])].forEach(node => {
-      paperNodes.forEach(paper => addGalaxyLink(links, node, paper, node.type === 'method' ? 'uses' : 'supports'));
-    });
-
-    if (paperNodes.length > 1 && relation === 'contradicts') {
-      for (let i = 1; i < paperNodes.length; i += 1) {
-        addGalaxyLink(links, paperNodes[0], paperNodes[i], 'contradicts');
-      }
-      const critiqueLabel = m.status === 'mixed' ? 'Mixed evidence' : 'Evidence limitation';
-      const critique = getOrCreateGalaxyNode(nodeMap, 'critique', critiqueLabel);
-      paperNodes.forEach(paper => addGalaxyLink(links, critique, paper, 'contradicts'));
-    }
-  });
-
-  galaxyData = {
-    nodes: [...nodeMap.values()],
-    links: links.map(({ _key, ...link }) => link),
-  };
-  if (galaxySelectedId && !nodeMap.has(galaxySelectedId)) galaxySelectedId = null;
-  if (galaxyFilter && !nodeMap.has(galaxyFilter)) galaxyFilter = null;
-}
-
-function paperNodeIdForMessage(m, index) {
-  return galaxyNodeId('paper', paperNodeLabel(index, m.sources?.[index]));
-}
-
-function decorateAnswer(m) {
-  const raw = String(m.content || '');
-  const tokenPattern = /\*\*(.*?)\*\*|\[P(\d+)\]/g;
-  let html = '';
-  let cursor = 0;
-  let match;
-  const appendText = text => { html += esc(text).replace(/\n/g, '<br>'); };
-
-  while ((match = tokenPattern.exec(raw))) {
-    appendText(raw.slice(cursor, match.index));
-    if (match[1] !== undefined) {
-      const label = match[1].trim();
-      const id = galaxyNodeId('concept', label);
-      html += `<b class="galaxy-mark" data-galaxy-node="${esc(id)}" tabindex="0">${esc(label)}</b>`;
-    } else {
-      const index = Number(match[2]) - 1;
-      const id = paperNodeIdForMessage(m, index);
-      html += `<span class="citation galaxy-mark" data-galaxy-node="${esc(id)}" tabindex="0">[P${esc(match[2])}]</span>`;
-    }
-    cursor = match.index + match[0].length;
-  }
-  appendText(raw.slice(cursor));
-  return html;
-}
-
-function selectedGalaxyNode() {
-  return galaxyData.nodes.find(node => node.id === galaxySelectedId) || null;
-}
-
-function messageMatchesGalaxyNode(m, node) {
-  if (!node) return true;
-  const content = `${m.content || ''} ${m.searchQuery || ''} ${m.agreement || ''} ${(m.limitations || []).join(' ')}`.toLowerCase();
-  if (node.type === 'paper') {
-    const tag = node.label.match(/\[P\d+\]/i)?.[0]?.toLowerCase();
-    const paperTitle = node.title?.toLowerCase();
-    return Boolean((tag && content.includes(tag)) || (paperTitle && content.includes(paperTitle)));
-  }
-  if (node.type === 'critique') return m.role === 'assistant' && (m.status === 'mixed' || /limitation|contradict|disagree|caveat|inconclusive/i.test(content));
-  return content.includes(node.label.toLowerCase());
-}
-
-function graphTypeLabel(type) {
-  return ({ concept: 'Concept', paper: 'Paper', method: 'Methodology', critique: 'Critique' })[type] || type;
 }
 
 /* ── Toast ── */
@@ -304,7 +137,10 @@ function messageHtml(m) {
     </article>`;
   }
 
-  const ans = decorateAnswer(m);
+  const ans = esc(m.content)
+    .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br>')
+    .replace(/\[P(\d+)\]/g, "<span class='citation'>[P$1]</span>");
 
   const focus = m.searchQuery
     ? `<div class="query-focus"><b>Search focus:</b>${esc(m.searchQuery)}</div>`
@@ -314,16 +150,16 @@ function messageHtml(m) {
     <div class="avatar">EA</div>
     <div class="bubble">
       <div class="message-title">Epistemia's research note</div>
-      <span class="status-chip ${esc(m.status || 'evidence')}">${esc(m.status || 'evidence')}</span>
+      <span class="status-chip ${esc(m.status)}">${esc(m.status)}</span>
       ${focus}
       <div style="margin-top:10px">${ans}</div>
       <div class="limits">
-        <b>Agreement signal</b><br>${esc(m.agreement || 'No agreement signal recorded.')}<br><br>
+        <b>Agreement signal</b><br>${esc(m.agreement)}<br><br>
         <b>Evidence limitations</b>
-        <ul>${(m.limitations || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+        <ul>${m.limitations.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
       </div>
       <div class="status-row">
-        Based on ${(m.sources || []).length} retrieved papers.
+        Based on ${m.sources.length} retrieved papers.
         Open a source in the reading list to inspect the scholarly record.
       </div>
     </div>
@@ -334,26 +170,10 @@ function messageHtml(m) {
 function renderFeed() {
   const chat = active();
   $('chatName').textContent = `› ${chat?.title || 'New chat'}`;
-  const allMessages = chat?.messages || [];
-  const node = selectedGalaxyNode();
-  const visibleMessages = galaxyFilter
-    ? allMessages.filter(message => messageMatchesGalaxyNode(message, node))
-    : allMessages;
-  const banner = galaxyFilter && node
-    ? `<div class="feed-filter-banner">
-        <span>Filtering feed by <b>${esc(node.label)}</b></span>
-        <button type="button" id="clearGalaxyFilter">Clear filter</button>
-      </div>`
-    : '';
-  const emptyFiltered = galaxyFilter && !visibleMessages.length
-    ? `<div class="source-empty feed-filter-empty">No messages mention this node yet.</div>`
-    : '';
-  $('feed').innerHTML = !allMessages.length
+  $('feed').innerHTML = !chat?.messages.length
     ? welcome()
-    : banner + emptyFiltered + visibleMessages.map(messageHtml).join('');
+    : chat.messages.map(messageHtml).join('');
   $('promptChips')?.querySelectorAll('button').forEach(b => b.onclick = () => send(b.textContent));
-  $('clearGalaxyFilter')?.addEventListener('click', clearGalaxyFilter);
-  bindGalaxyFeedMarks();
   if (pinPrompt) setTimeout(() => scrollToLatestPrompt('auto'), 0);
   else setTimeout(() => $('feed').lastElementChild?.scrollIntoView({ block: 'end' }), 0);
 }
@@ -427,233 +247,17 @@ function renderSources() {
         ${esc(p.venue || 'Venue unavailable')}
       </div>
       <div class="source-stats">
-        <span>${Number(p.citations || 0).toLocaleString()} citations</span>
+        <span>${p.citations.toLocaleString()} citations</span>
         ${p.openAccess ? '<span>Open access</span>' : ''}
       </div>
       <span class="source-link">Open full record ↗</span>
     </a>`).join('');
 }
 
-/* ── Research Galaxy graph ── */
-function graphDisplayLabel(node) {
-  if (node.type === 'paper') {
-    const tag = node.label.match(/^\[P\d+\]/)?.[0] || '';
-    const author = node.authors ? String(node.authors).split(/[;,]/)[0].trim() : '';
-    return author ? `${tag} ${author}` : tag || node.label;
-  }
-  return node.label.length > 25 ? `${node.label.slice(0, 24).trim()}…` : node.label;
-}
-
-function highlightGalaxyNode(id) {
-  if (!galaxySvg) return;
-  const activeIdForHighlight = id || galaxySelectedId;
-  const nodes = galaxyData.nodes;
-  const links = galaxyData.links;
-  if (!activeIdForHighlight) {
-    galaxySvg.selectAll('.galaxy-node,.galaxy-link').classed('is-dim', false);
-    return;
-  }
-
-  const connected = new Set([activeIdForHighlight]);
-  links.forEach(link => {
-    const source = typeof link.source === 'object' ? link.source.id : link.source;
-    const target = typeof link.target === 'object' ? link.target.id : link.target;
-    if (source === activeIdForHighlight) connected.add(target);
-    if (target === activeIdForHighlight) connected.add(source);
-  });
-  galaxySvg.selectAll('.galaxy-node')
-    .classed('is-dim', d => !connected.has(d.id))
-    .classed('is-selected', d => d.id === galaxySelectedId);
-  galaxySvg.selectAll('.galaxy-link')
-    .classed('is-dim', link => {
-      const source = typeof link.source === 'object' ? link.source.id : link.source;
-      const target = typeof link.target === 'object' ? link.target.id : link.target;
-      return source !== activeIdForHighlight && target !== activeIdForHighlight;
-    });
-}
-
-function updateGalaxyDetail(node) {
-  const detail = $('galaxyDetail');
-  if (!detail) return;
-  if (!node) {
-    detail.hidden = true;
-    return;
-  }
-  detail.hidden = false;
-  $('detailDot').className = `detail-dot ${node.type}`;
-  $('detailType').textContent = graphTypeLabel(node.type);
-  $('detailTitle').textContent = node.label;
-  const metadata = node.type === 'paper' && node.title
-    ? `${node.title}${node.authors ? ` · ${node.authors}` : ''}${node.year ? ` · ${node.year}` : ''}`
-    : `${node.count} ${node.count === 1 ? 'appearance' : 'appearances'} across this conversation`;
-  $('detailMeta').textContent = metadata;
-  $('filterFeedBtn').onclick = () => {
-    galaxyFilter = node.id;
-    renderFeed();
-    requestAnimationFrame(() => $('feed').scrollTo({ top: 0, behavior: 'smooth' }));
-  };
-}
-
-function selectGalaxyNode(id) {
-  const node = galaxyData.nodes.find(item => item.id === id);
-  if (!node) return;
-  galaxySelectedId = id;
-  updateGalaxyDetail(node);
-  highlightGalaxyNode(id);
-}
-
-function clearGalaxyFilter() {
-  galaxyFilter = null;
-  renderFeed();
-}
-
-function fitGalaxyGraph() {
-  if (!galaxySvg || !galaxyZoom || !galaxyZoomGroup || !galaxyData.nodes.length) return;
-  const width = $('galaxyGraphCanvas').clientWidth;
-  const height = $('galaxyGraphCanvas').clientHeight;
-  const xs = galaxyData.nodes.map(node => node.x || width / 2);
-  const ys = galaxyData.nodes.map(node => node.y || height / 2);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const graphWidth = Math.max(120, maxX - minX);
-  const graphHeight = Math.max(120, maxY - minY);
-  const scale = Math.min(1.15, Math.min((width - 58) / graphWidth, (height - 58) / graphHeight));
-  const tx = width / 2 - ((minX + maxX) / 2) * scale;
-  const ty = height / 2 - ((minY + maxY) / 2) * scale;
-  galaxySvg.transition().duration(350).call(
-    galaxyZoom.transform,
-    d3.zoomIdentity.translate(tx, ty).scale(Math.max(.55, scale))
-  );
-}
-
-function renderGalaxy() {
-  const panel = $('galaxyPanel');
-  const canvas = $('galaxyGraphCanvas');
-  if (!panel || !canvas) return;
-  $('galaxyNodeCount').textContent = galaxyData.nodes.length;
-  $('galaxyBadge').textContent = galaxyData.nodes.length;
-  $('galaxyBadge').hidden = !galaxyData.nodes.length;
-  $('galaxyBadgeM').textContent = galaxyData.nodes.length;
-  $('galaxyBadgeM').hidden = !galaxyData.nodes.length;
-  $('galaxyEmpty').hidden = galaxyData.nodes.length > 0;
-  panel.setAttribute('aria-hidden', document.body.classList.contains('galaxy-open') ? 'false' : 'true');
-
-  if (typeof d3 === 'undefined') return;
-  if (galaxySimulation) galaxySimulation.stop();
-  canvas.replaceChildren();
-  if (!galaxyData.nodes.length) {
-    galaxySvg = null;
-    galaxyZoom = null;
-    galaxyZoomGroup = null;
-    updateGalaxyDetail(null);
-    return;
-  }
-
-  const width = Math.max(canvas.clientWidth, 300);
-  const height = Math.max(canvas.clientHeight, 300);
-  galaxySvg = d3.select(canvas).append('svg')
-    .attr('viewBox', `0 0 ${width} ${height}`)
-    .attr('aria-label', 'Research Galaxy network graph');
-  galaxyZoomGroup = galaxySvg.append('g');
-  galaxyZoom = d3.zoom().scaleExtent([.4, 2.6]).on('zoom', event => {
-    galaxyZoomGroup.attr('transform', event.transform);
-  });
-  galaxySvg.call(galaxyZoom).on('dblclick.zoom', null);
-
-  const link = galaxyZoomGroup.append('g').attr('aria-hidden', 'true')
-    .selectAll('line').data(galaxyData.links).join('line')
-    .attr('class', d => `galaxy-link ${d.relation}`)
-    .attr('stroke-width', d => d.relation === 'contradicts' ? 1.8 : 1.25);
-
-  const node = galaxyZoomGroup.append('g').attr('class', 'galaxy-nodes')
-    .selectAll('g').data(galaxyData.nodes, d => d.id).join('g')
-    .attr('class', 'galaxy-node')
-    .attr('tabindex', 0)
-    .attr('role', 'button')
-    .attr('aria-label', d => `${graphTypeLabel(d.type)}: ${d.label}`)
-    .on('click', (_, d) => selectGalaxyNode(d.id))
-    .on('mouseenter', (_, d) => highlightGalaxyNode(d.id))
-    .on('mouseleave', () => highlightGalaxyNode(galaxySelectedId))
-    .on('focus', (_, d) => highlightGalaxyNode(d.id))
-    .on('blur', () => highlightGalaxyNode(galaxySelectedId))
-    .on('keydown', (event, d) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        selectGalaxyNode(d.id);
-      }
-    })
-    .call(d3.drag()
-      .on('start', (event, d) => {
-        if (!event.active) galaxySimulation.alphaTarget(.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
-      })
-      .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
-      .on('end', (event, d) => {
-        if (!event.active) galaxySimulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
-      }));
-
-  node.append('circle')
-    .attr('r', d => Math.min(16, 7 + Math.sqrt(d.count) * 2))
-    .attr('fill', d => GALAXY_COLORS[d.type]);
-  node.append('text')
-    .attr('class', d => d.type === 'paper' ? 'paper-label' : '')
-    .attr('x', d => 10 + Math.min(8, Math.sqrt(d.count)))
-    .attr('y', 3)
-    .text(graphDisplayLabel);
-  node.append('title').text(d => `${graphTypeLabel(d.type)}: ${d.label}`);
-
-  galaxySimulation = d3.forceSimulation(galaxyData.nodes)
-    .force('link', d3.forceLink(galaxyData.links).id(d => d.id).distance(72).strength(.6))
-    .force('charge', d3.forceManyBody().strength(-120))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide().radius(d => 18 + Math.sqrt(d.count) * 2).strength(.9))
-    .on('tick', () => {
-      link
-        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-      node.attr('transform', d => `translate(${d.x},${d.y})`);
-    })
-    .on('end', fitGalaxyGraph);
-
-  if (galaxySelectedId) {
-    updateGalaxyDetail(selectedGalaxyNode());
-    highlightGalaxyNode(galaxySelectedId);
-  }
-}
-
-function resizeGalaxyGraph() {
-  if (!galaxySvg || !galaxySimulation) return;
-  const canvas = $('galaxyGraphCanvas');
-  const width = Math.max(canvas.clientWidth, 300);
-  const height = Math.max(canvas.clientHeight, 300);
-  galaxySvg.attr('viewBox', `0 0 ${width} ${height}`);
-  galaxySimulation.force('center', d3.forceCenter(width / 2, height / 2)).alpha(.15).restart();
-  window.clearTimeout(window._galaxyFitTimer);
-  window._galaxyFitTimer = window.setTimeout(fitGalaxyGraph, 180);
-}
-
-function bindGalaxyFeedMarks() {
-  $('feed').querySelectorAll('[data-galaxy-node]').forEach(mark => {
-    const id = mark.dataset.galaxyNode;
-    mark.addEventListener('mouseenter', () => highlightGalaxyNode(id));
-    mark.addEventListener('mouseleave', () => highlightGalaxyNode(galaxySelectedId));
-    mark.addEventListener('focus', () => highlightGalaxyNode(id));
-    mark.addEventListener('blur', () => highlightGalaxyNode(galaxySelectedId));
-    mark.addEventListener('click', () => selectGalaxyNode(id));
-  });
-}
-
 function renderAll() {
-  rebuildGalaxyData();
   renderChats();
   renderFeed();
   renderSources();
-  renderGalaxy();
 }
 
 /* ── Error display ── */
@@ -859,23 +463,11 @@ else renderAll();
   const scrim = $('scrim');
   const isMobile = () => window.matchMedia('(max-width:900px)').matches;
 
-  function syncGalaxyPanelState() {
-    const open = body.classList.contains('galaxy-open');
-    $('galaxyToggle')?.setAttribute('aria-expanded', String(open));
-    $('galaxyPanel')?.setAttribute('aria-hidden', String(!open));
-  }
-  function closeAll() {
-    body.classList.remove('nav-open', 'src-open', 'galaxy-open');
-    syncGalaxyPanelState();
-  }
+  function closeAll() { body.classList.remove('nav-open', 'src-open'); }
   function toggle(cls) { const on = body.classList.contains(cls); closeAll(); if (!on) body.classList.add(cls); }
 
   $('navToggle').onclick = () => toggle('nav-open');
   $('srcToggle').onclick = () => toggle('src-open');
-  $('galaxyToggle').onclick = () => { toggle('galaxy-open'); syncGalaxyPanelState(); };
-  $('galaxyToggleM').onclick = () => { toggle('galaxy-open'); syncGalaxyPanelState(); };
-  $('galaxyClose').onclick = closeAll;
-  $('galaxyReset').onclick = fitGalaxyGraph;
   $('newChatM').onclick  = () => { createChat(); closeAll(); };
 
   const sc = $('srcClose');
@@ -889,8 +481,7 @@ else renderAll();
   scrim.onclick = closeAll;
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAll(); });
   $('chatList').addEventListener('click', e => { if (!e.target.closest('[data-rename],[data-delete]')) closeAll(); });
-  window.addEventListener('resize', () => { if (isMobile()) syncGalaxyPanelState(); });
-  window.addEventListener('resize', resizeGalaxyGraph);
+  window.addEventListener('resize', () => { if (!isMobile()) closeAll(); });
 
   /* Sync mobile header with desktop state */
   function sync() {
@@ -900,10 +491,6 @@ else renderAll();
     const badge = $('srcBadge');
     badge.textContent = n;
     badge.hidden      = !n;
-    const galaxyCount = Number($('galaxyNodeCount').textContent || 0);
-    $('galaxyBadgeM').textContent = galaxyCount;
-    $('galaxyBadgeM').hidden = !galaxyCount;
-    syncGalaxyPanelState();
   }
 
   const _renderAll    = renderAll;
@@ -913,18 +500,6 @@ else renderAll();
   renderSources = function () { _renderSources.apply(this, arguments); sync(); };
 
   sync();
-  document.querySelectorAll('[data-galaxy-type]').forEach(button => {
-    button.addEventListener('click', () => {
-      const type = button.dataset.galaxyType;
-      const isActive = button.classList.toggle('is-active');
-      document.querySelectorAll('[data-galaxy-type]').forEach(other => {
-        if (other !== button) other.classList.remove('is-active');
-      });
-      if (!galaxySvg) return;
-      galaxySvg.selectAll('.galaxy-node').classed('is-dim', d => isActive ? d.type !== type : false);
-      galaxySvg.selectAll('.galaxy-link').classed('is-dim', isActive);
-    });
-  });
 
   if (isMobile()) $('prompt').placeholder = 'Ask a research question…';
 
