@@ -35,6 +35,7 @@
       <span id="mChatName">New conversation</span>
     </div>
     <button class="mbtn" id="newChatM" type="button" aria-label="New conversation">&#65291;</button>
+    <button class="mbtn" id="priorWorkM" type="button" aria-label="Prior work check">&#9673;</button>
     <button class="mbtn" id="srcToggle" type="button" aria-label="Open reading list">
       &#128218;<em id="srcBadge" hidden>0</em>
     </button>
@@ -59,6 +60,9 @@
       </div>
 
       <button class="new-chat" id="newChat"><span>＋</span>New conversation</button>
+      <button class="prior-btn" id="priorWorkBtn" type="button">
+        <span>◎</span>Prior work &amp; semantic match
+      </button>
       <div class="nav-label">Your conversations</div>
       <div id="chatList" class="chat-list"></div>
 
@@ -114,6 +118,43 @@
       </div>
     </aside>
 
+  </div>
+
+  <!-- Prior Work & Semantic Match modal -->
+  <div class="modal-scrim" id="pwScrim" hidden></div>
+  <div class="modal" id="pwModal" role="dialog" aria-modal="true" aria-labelledby="pwTitle" hidden>
+    <div class="modal-head">
+      <div>
+        <div class="eyebrow">Semantic overlap &amp; literature citation finder</div>
+        <h2 id="pwTitle">Prior work &amp; semantic match</h2>
+      </div>
+      <button type="button" class="drawer-close" id="pwClose" aria-label="Close">&#215;</button>
+    </div>
+
+    <div class="modal-body">
+      <label class="field">
+        <span>Paper title</span>
+        <input id="pwPaperTitle" type="text" maxlength="300"
+               placeholder="e.g. Contrastive pretraining for low-resource clinical NER">
+      </label>
+
+      <label class="field">
+        <span>Draft text or snippet</span>
+        <textarea id="pwPaperText" rows="9"
+                  placeholder="Paste an abstract, section, or full draft. The assistant condenses it into an optimised OpenAlex search string."></textarea>
+      </label>
+
+      <div class="modal-note">
+        Results are <b>semantic similarity matches against titles, abstracts and metadata</b>
+        indexed in OpenAlex — not a plagiarism verdict, and not a full-text scan.
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <span class="modal-status" id="pwStatus"></span>
+      <button type="button" class="ghost-btn" id="pwCancel">Cancel</button>
+      <button type="button" class="send" id="pwRun">Analyse prior work</button>
+    </div>
   </div>
 
   <div id="toast" class="toast"></div>

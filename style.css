@@ -179,3 +179,45 @@ textarea{flex:1;min-width:0;min-height:48px;max-height:140px;resize:none;border:
   .mbar-title strong{font-size:14px}
   .send{min-width:62px}
 }
+
+
+/* ── Prior work & semantic match ── */
+.prior-btn{width:100%;margin-top:8px;border:1px solid var(--line);border-radius:9px;background:var(--white);color:#4a443d;padding:10px 12px;font-weight:700;text-align:left;cursor:pointer}
+.prior-btn:hover{border-color:#cbbfae;background:#f6f1e9;color:#2f2a25}
+.prior-btn span{margin-right:8px;color:var(--violet);font-size:14px}
+
+.modal-scrim{position:fixed;inset:0;background:rgba(38,32,26,.42);z-index:60}
+.modal{position:fixed;z-index:61;top:50%;left:50%;transform:translate(-50%,-50%);width:min(680px,calc(100vw - 32px));max-height:min(88vh,860px);display:flex;flex-direction:column;background:var(--white);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:20px 22px 14px;border-bottom:1px solid var(--line)}
+.modal-head h2{margin:4px 0 0;font:700 20px Georgia,serif;letter-spacing:-.02em}
+.modal-body{padding:18px 22px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field>span{color:#968e83;font-size:10px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}
+.field input,.field textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--paper);color:var(--ink);padding:10px 12px;resize:vertical}
+.field input:focus,.field textarea:focus{outline:2px solid #c98d73;outline-offset:1px}
+.modal-note{border-left:3px solid var(--violet);background:var(--soft);border-radius:0 8px 8px 0;padding:10px 12px;color:#6b5f54;font-size:12px;line-height:1.5}
+.modal-foot{display:flex;align-items:center;gap:10px;padding:14px 22px;border-top:1px solid var(--line);background:#faf8f4}
+.modal-status{flex:1;min-width:0;color:var(--muted);font-size:12px}
+.ghost-btn{border:1px solid var(--line);border-radius:9px;background:var(--white);color:#4a443d;padding:9px 14px;font-weight:700;cursor:pointer}
+.ghost-btn:hover{background:#f2ece3}
+
+.pw-cards{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+.pw-card{border:1px solid var(--line);border-radius:11px;background:var(--paper);padding:12px 13px}
+.pw-card-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.pw-card h4{margin:0 0 4px;font:700 14px Georgia,serif;line-height:1.35}
+.pw-level{border-radius:999px;padding:2px 9px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.pw-level.high{background:#f6ddd6;color:var(--red)}
+.pw-level.medium{background:#f7ead1;color:var(--amber)}
+.pw-level.low{background:#dfeae2;color:var(--green)}
+.pw-status.high{background:#f6ddd6;color:var(--red)}
+.pw-status.medium{background:#f7ead1;color:var(--amber)}
+.pw-status.low{background:#dfeae2;color:var(--green)}
+.pw-concepts{margin:8px 0 6px;padding-left:18px;color:#5f584f;font-size:12.5px;line-height:1.5}
+.pw-concepts li{margin-bottom:3px}
+
+@media (max-width:900px){
+  .modal{width:calc(100vw - 20px);max-height:92vh}
+  .modal-foot{flex-wrap:wrap}
+}
+
+.modal[hidden],.modal-scrim[hidden]{display:none!important}
