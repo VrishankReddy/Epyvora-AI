@@ -38,6 +38,9 @@
     <button class="mbtn" id="srcToggle" type="button" aria-label="Open reading list">
       &#128218;<em id="srcBadge" hidden>0</em>
     </button>
+    <button class="mbtn galaxy-toggle" id="galaxyToggleM" type="button" aria-label="Open Research Galaxy">
+      &#9678;<em id="galaxyBadgeM" hidden>0</em>
+    </button>
   </header>
 
   <div class="scrim" id="scrim"></div>
@@ -78,7 +81,15 @@
     <main class="chat">
       <header class="top">
         <div class="crumb">Epistemia AI <b id="chatName">› New conversation</b></div>
-        <span class="live"><i></i>Full-corpus scholarly search</span>
+        <div class="top-actions">
+          <span class="live"><i></i>Full-corpus scholarly search</span>
+          <button class="galaxy-toggle desktop-galaxy-toggle" id="galaxyToggle" type="button"
+                  aria-label="Open Research Galaxy" aria-expanded="false">
+            <span class="galaxy-icon" aria-hidden="true">&#9678;</span>
+            <span>Research Galaxy</span>
+            <em id="galaxyBadge" hidden>0</em>
+          </button>
+        </div>
       </header>
 
       <div class="feed" id="feed"></div>
@@ -116,8 +127,47 @@
 
   </div>
 
+  <!-- Right slide-out panel: research entity graph -->
+  <aside class="galaxy" id="galaxyPanel" aria-label="Research Galaxy" aria-hidden="true">
+    <div class="galaxy-head">
+      <div>
+        <div class="eyebrow">Evidence map</div>
+        <h2>Research Galaxy</h2>
+        <div class="galaxy-count"><span id="galaxyNodeCount">0</span> active nodes</div>
+      </div>
+      <div class="galaxy-head-actions">
+        <button class="icon-btn" id="galaxyReset" type="button" title="Reset graph view" aria-label="Reset graph view">&#8634;</button>
+        <button class="drawer-close" id="galaxyClose" type="button" aria-label="Close Research Galaxy">&#215;</button>
+      </div>
+    </div>
+
+    <div class="galaxy-graph-wrap">
+      <div id="galaxyGraphCanvas" role="img" aria-label="Interactive research relationship graph"></div>
+      <div class="galaxy-empty" id="galaxyEmpty">
+        <div class="galaxy-empty-mark">✦</div>
+        <b>Your evidence map will appear here</b>
+        <span>Ask a research question to connect concepts, papers, and methods.</span>
+      </div>
+    </div>
+
+    <div class="galaxy-legend" aria-label="Graph legend">
+      <button class="legend-item" data-galaxy-type="concept" type="button"><i class="legend-dot concept"></i>Concept</button>
+      <button class="legend-item" data-galaxy-type="paper" type="button"><i class="legend-dot paper"></i>Paper</button>
+      <button class="legend-item" data-galaxy-type="method" type="button"><i class="legend-dot method"></i>Method</button>
+      <button class="legend-item" data-galaxy-type="critique" type="button"><i class="legend-dot critique"></i>Critique</button>
+    </div>
+
+    <div class="galaxy-detail" id="galaxyDetail" hidden>
+      <div class="galaxy-detail-kicker"><span class="detail-dot" id="detailDot"></span><span id="detailType">Selected node</span></div>
+      <div class="galaxy-detail-title" id="detailTitle"></div>
+      <div class="galaxy-detail-meta" id="detailMeta"></div>
+      <button class="filter-feed-btn" id="filterFeedBtn" type="button">Filter chat feed <span>→</span></button>
+    </div>
+  </aside>
+
   <div id="toast" class="toast"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="script.js"></script>
 </body>
 </html>
