@@ -117,8 +117,6 @@ function welcome() {
 
 /* ── Render: individual message HTML ── */
 function messageHtml(m) {
-  if (m.role === 'priorwork') return priorWorkHtml(m);
-
   if (m.role === 'user') {
     return `<article class="message user">
       <div class="avatar">You</div>
@@ -274,7 +272,7 @@ function addError(message) {
 /* ── Build conversation history for the API ── */
 function buildHistory() {
   return (active()?.messages || [])
-    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .filter(m => m.role !== 'typing')
     .slice(-6)
     .map(m => ({ role: m.role, content: m.content }));
 }
@@ -521,144 +519,4 @@ else renderAll();
   $('prompt').addEventListener('focus', () => {
     if (isMobile()) setTimeout(() => $('prompt').scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
   });
-})();
-
-
-/* ═══════════════════════════════════════════════════════════════
-   Prior Work & Semantic Match Assistant
-   Pipeline: draft → optimised query → OpenAlex → overlap report
-   ═══════════════════════════════════════════════════════════════ */
-
-const PW_DISCLAIMER =
-  'This analysis is based on available titles, abstracts, and metadata indexed in OpenAlex ' +
-  '(250M+ records). It does not scan full paywalled paper bodies.';
-
-const PW_STATUS_LABEL = {
-  HIGH_OVERLAP:    'High overlap',
-  MEDIUM_OVERLAP:  'Medium overlap',
-  LOW_OVERLAP:     'Low overlap',
-  NO_MATCHES_FOUND:'No matches found',
-};
-
-function pwLevelClass(level) {
-  const v = String(level || '').toLowerCase();
-  return v.startsWith('high') ? 'high' : v.startsWith('med') ? 'medium' : 'low';
-}
-
-/* ── Render: prior-work report message ── */
-function priorWorkHtml(m) {
-  const r = m.report || {};
-  const papers = Array.isArray(r.matched_papers) ? r.matched_papers : [];
-  const statusKey = String(r.match_status || 'LOW_OVERLAP').toUpperCase();
-
-  const cards = papers.length ? papers.map((p, i) => `
-    <div class="pw-card">
-      <div class="pw-card-head">
-        <span class="source-tag">P${i + 1}</span>
-        <span class="pw-level ${pwLevelClass(p.similarity_level)}">${esc(p.similarity_level || 'Low')} similarity</span>
-      </div>
-      <h4>${esc(p.title || 'Untitled record')}</h4>
-      <div class="source-meta">
-        ${esc(p.authors || 'Authors unavailable')} · ${esc(p.publication_year || 'Year unavailable')}
-      </div>
-      ${(p.overlapping_concepts || []).length
-        ? `<ul class="pw-concepts">${p.overlapping_concepts.map(c => `<li>${esc(c)}</li>`).join('')}</ul>`
-        : ''}
-      ${p.url ? `<a class="source-link" href="${esc(p.url)}" target="_blank" rel="noopener">Open OpenAlex record ↗</a>` : ''}
-    </div>`).join('')
-    : `<div class="status-row">No sufficiently related records were returned by OpenAlex for this draft.</div>`;
-
-  return `<article class="message assistant">
-    <div class="avatar">EA</div>
-    <div class="bubble">
-      <div class="message-title">Prior work &amp; semantic match report</div>
-      <span class="status-chip pw-status ${pwLevelClass(statusKey.split('_')[0])}">${esc(PW_STATUS_LABEL[statusKey] || statusKey)}</span>
-      ${m.paperTitle ? `<div class="query-focus"><b>Draft:</b>${esc(m.paperTitle)}</div>` : ''}
-      <div class="query-focus"><b>Search focus:</b>${esc(r.search_query || '')}</div>
-      <div style="margin-top:10px">${esc(r.summary || '')}</div>
-      <div class="pw-cards">${cards}</div>
-      <div class="limits"><b>Scope of this check</b><br>${esc(r.disclaimer || PW_DISCLAIMER)}</div>
-    </div>
-  </article>`;
-}
-
-/* ── Modal plumbing ── */
-(function () {
-  const modal  = $('pwModal');
-  const scrim  = $('pwScrim');
-  const status = $('pwStatus');
-  let running  = false;
-
-  function open() {
-    modal.hidden = false; scrim.hidden = false;
-    document.body.classList.remove('nav-open', 'src-open');
-    status.textContent = '';
-    setTimeout(() => $('pwPaperTitle').focus(), 30);
-  }
-  function close() {
-    if (running) return;
-    modal.hidden = true; scrim.hidden = true;
-  }
-
-  $('priorWorkBtn').onclick = open;
-  $('priorWorkM').onclick   = open;
-  $('pwClose').onclick      = close;
-  $('pwCancel').onclick     = close;
-  scrim.onclick             = close;
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.hidden) close(); });
-
-  $('pwRun').onclick = async () => {
-    if (running) return;
-    const title = $('pwPaperTitle').value.trim();
-    const text  = $('pwPaperText').value.trim();
-
-    if (title.length < 3)  { toast('Add the title of your draft.'); return; }
-    if (text.length  < 80) { toast('Paste at least a paragraph of your draft (80+ characters).'); return; }
-
-    running = true;
-    $('pwRun').disabled = true;
-    status.textContent = 'Condensing your draft into an OpenAlex query…';
-
-    try {
-      const res = await fetch('/api/prior-work', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ title, text }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `Server returned HTTP ${res.status}.`);
-      if (!data.match_status) throw new Error('The analysis service returned an unexpected response.');
-
-      if (!activeId) createChat();
-      const chat = active();
-      chat.messages.push({
-        role:       'priorwork',
-        content:    `Prior work check — ${title}`,
-        paperTitle: title,
-        report:     data,
-        sources:    (data.matched_papers || []).map(p => ({
-          title:      p.title || 'Untitled record',
-          authors:    p.authors || 'Authors unavailable',
-          year:       p.publication_year || '',
-          venue:      p.venue || 'OpenAlex record',
-          url:        p.url || p.openalex_id || '#',
-          citations:  Number(p.citations || 0),
-          openAccess: !!p.open_access,
-        })),
-      });
-      if (chat.title === 'New research chat') chat.title = `Prior work · ${title}`.slice(0, 48);
-      save();
-
-      modal.hidden = true; scrim.hidden = true;
-      renderAll();
-      toast('Prior work analysis added to this conversation.');
-    } catch (err) {
-      status.textContent = '';
-      toast(err.message || 'Prior work analysis failed.');
-    } finally {
-      running = false;
-      $('pwRun').disabled = false;
-    }
-  };
 })();
