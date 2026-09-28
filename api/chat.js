@@ -1,19 +1,5 @@
-/* =============================================================
-   api/chat.js — Vercel Serverless Function (streaming)
-   Secure proxy: SCHOLAR_API_KEY and LLM_API_KEY stay server-side.
-
-   Streams newline-delimited JSON events so the client can update
-   the typing indicator in real-time, matching the original UX:
-
-     {"event":"interpreted", searchQuery, specificity, topic}
-     {"event":"searching",   count}
-     {"event":"result",      answer, status, agreement,
-                             limitations, sources, searchQuery, specificity}
-     {"event":"error",       error}
-   ============================================================= */
-
-const LLM_MODEL    = 'gemini-3.5-flash-lite';
 const GEMINI_BASE  = 'https://generativelanguage.googleapis.com/v1beta/models';
+const LLM_MODEL    = 'gemini-3.5-flash-lite';
 const OPENALEX_URL = 'https://api.openalex.org/works';
 
 /* ── Utilities ── */
@@ -292,7 +278,7 @@ function safeAnswer(raw, papers) {
 
 async function synthesize(question, interpretation, papers, history, apiKey) {
   const prompt =
-    `You are Epistemia AI, a warm but concise academic research companion. ` +
+    `You are Epyvora AI, a warm but concise academic research companion. ` +
     `Answer only the user's research question. ` +
     `Use conversation history only to understand follow-up intent; use ONLY the current supplied papers for factual claims. ` +
     `Read every supplied paper carefully before answering; weigh agreement and disagreement across them rather than paraphrasing the first match. ` +

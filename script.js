@@ -105,7 +105,7 @@ function welcome() {
   return `<section class="welcome">
     <div class="spark">✦</div>
     <h1>Think with research.<br><em>Stay close to the source.</em></h1>
-    <p>Epistemia AI is a concise research companion. Ask naturally: it finds relevant
+    <p>Epyvora AI is a concise research companion. Ask naturally: it finds relevant
        scholarly papers first, then replies from those records with visible citations.</p>
     <div class="prompt-chips" id="promptChips">
       <button>Does remote work improve employee productivity?</button>
@@ -149,7 +149,7 @@ function messageHtml(m) {
   return `<article class="message assistant">
     <div class="avatar">EA</div>
     <div class="bubble">
-      <div class="message-title">Epistemia's research note</div>
+      <div class="message-title">Epyvora's research note</div>
       <span class="status-chip ${esc(m.status)}">${esc(m.status)}</span>
       ${focus}
       <div style="margin-top:10px">${ans}</div>
